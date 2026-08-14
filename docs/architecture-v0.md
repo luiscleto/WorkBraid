@@ -50,10 +50,19 @@ Initial accepted tree layout:
 ```text
 architecture.yaml
 components/
-  <human-readable-name>.md
+  <filename>.md
 ```
 
 The `components/` directory may be absent when there are zero components.
+
+Architecture format v1 discovers components non-recursively as `components/*.md`. A valid v1 accepted tree contains only:
+
+- `architecture.yaml`; and
+- zero or more component files directly under `components/` whose filenames end in `.md`.
+
+Nested component directories and every other accepted-tree path are invalid in v1.
+
+Each canonical manifest or component path must be an ordinary Git blob entry. A symlink, submodule/gitlink, or tree at one of those paths is invalid. WorkBraid-created canonical files use mode `100644`. Executable mode has no Architecture semantics; when editing an existing regular-file blob, WorkBraid does not gratuitously change its existing regular-file mode.
 
 ### Store manifest
 
@@ -64,6 +73,28 @@ The `components/` directory may be absent when there are zero components.
 - an immutable opaque WorkBraid store ID;
 - a human-readable project name;
 - a source-repository hint for recovery/reassociation.
+
+The literal v1 manifest shape is:
+
+```yaml
+format: workbraid-architecture
+version: 1
+store_id: "6f2f9de7-22c2-4cd5-b7da-91f3454f09e4"
+project:
+  name: "Example Project"
+  source_hint: "/home/alice/src/example-project"
+```
+
+Its exact v1 fields and types are:
+
+- `format`: required string with the literal value `workbraid-architecture`;
+- `version`: required integer with the literal value `1`;
+- `store_id`: required string containing a valid UUID;
+- `project`: required mapping containing exactly:
+  - `name`: required string, non-empty after trimming;
+  - `source_hint`: required string, non-empty after trimming.
+
+The v1 manifest schema is closed. Unknown keys at the top level or inside `project` are invalid rather than ignored. Future semantic fields require format evolution.
 
 Format and version are compatibility guards. WorkBraid rejects unsupported values rather than interpreting them using current assumptions. Migration/version-negotiation machinery is deferred until needed.
 
@@ -100,7 +131,29 @@ A component ID survives:
 
 Deliberately changing the ID creates replacement/new identity rather than an ordinary edit. Filenames carry no identity.
 
-After YAML frontmatter and optional whitespace, the first Markdown block is the required level-one heading and canonical component title. The remainder is the component body. The title is not duplicated in frontmatter.
+After YAML frontmatter and optional whitespace, the first Markdown block is the required level-one heading and canonical component title. A usable title is non-empty after trimming. Both CommonMark ATX and Setext level-one headings are accepted on load; WorkBraid-generated component files use an ATX H1. The remainder is the component body. The title is not duplicated in frontmatter.
+
+The literal v1 component frontmatter shape is:
+
+```yaml
+---
+id: "0f86a8c3-487a-4bc8-9ff0-9d0d7c9dcd34"
+relationships:
+  - target: "c7f3d6b4-3f4a-42b9-87b8-4d7be325fd79"
+    label: "calls"
+---
+# API
+```
+
+Its exact v1 fields and types are:
+
+- `id`: required string containing a valid UUID;
+- `relationships`: optional sequence; omission means no outgoing relationships;
+- each relationship item: a mapping containing exactly:
+  - `target`: required string containing a valid component UUID;
+  - `label`: required string, non-empty after trimming.
+
+The v1 component-frontmatter schema is closed. Unknown component or relationship-item keys are invalid rather than ignored. Future semantic fields require format evolution.
 
 ### Relationships
 
@@ -119,7 +172,7 @@ Relationship rules:
 - labels are free text, not an enumerated taxonomy;
 - multiple relationships between the same source and target are allowed;
 - relationships do not initially have stable IDs or lifecycle;
-- target IDs must resolve within the accepted Architecture;
+- target IDs must resolve within the complete revision being validated: the accepted tree during load and the candidate tree before commit;
 - cycles are allowed;
 - relationship order has no domain meaning;
 - no hierarchy or central relationship registry exists initially.
@@ -202,11 +255,12 @@ Validation remains intentionally small.
 
 A valid accepted Architecture requires:
 
+- canonical manifest and component paths that are ordinary Git blob entries rather than symlinks, gitlinks, or trees;
 - a parseable manifest with supported format/version and required store identity information;
 - discovered component files with parseable YAML frontmatter;
 - valid and unique component IDs;
 - valid UTF-8 Markdown;
-- a usable required first-block H1 title;
+- a required first-block H1 title whose text is non-empty after trimming;
 - parseable relationship declarations;
 - resolvable relationship target IDs.
 
@@ -230,6 +284,8 @@ The canonical Git store remains unchanged until the accepted operation succeeds.
 
 - the previous accepted revision;
 - the pending change set for continued editing or retry during the running application session.
+
+Candidate construction starts from the exact base tree. Unchanged paths reuse their exact base-tree entries and blobs; only changed or newly created canonical files are serialized into new blobs. Editing an existing regular file preserves its regular-file mode; newly created canonical files use `100644`. Structural and relationship validation runs against the complete resulting candidate tree before commit.
 
 ### Direct human commit flow
 
@@ -280,7 +336,7 @@ Creating a component generates:
 - its required H1;
 - a human-readable filename.
 
-Changing the title does not automatically rename the file.
+Filename generation is creation-time behavior only. Loading accepts any filename that matches the non-recursive v1 component discovery rule. Changing the title does not automatically rename the file.
 
 Initial UI does not require:
 
@@ -327,11 +383,12 @@ Initially:
 - SQLite is appropriate for this mapping;
 - private-store locations are deterministic from store UUID under WorkBraid application data;
 - only source-root -> store-ID is persisted;
+- the normalized source-root key is unique, so it maps to at most one store ID;
 - the source root is a local convenience key, not durable repository identity.
 
 A missing association means only that WorkBraid does not currently know which store belongs to that source root. It is not evidence that no store exists.
 
-Creating a new store always requires explicit human initialization. Moving, cloning, or reopening a source repository at another path may require explicit reassociation later. No source-repository fingerprinting or repository-identity machinery is introduced.
+Creating a new store always requires explicit human initialization. Moving, cloning, or reopening a source repository at another path may require explicit reassociation later. Initial path normalization is lexical and does not resolve symlinks. No source-repository fingerprinting or repository-identity machinery is introduced.
 
 Loss of the association loses convenience, not canonical Architecture.
 
@@ -392,6 +449,8 @@ WorkBraid:
 - constructs temporary candidate state separately;
 - does not synchronize a permanent checkout after commits;
 - ignores arbitrary checkout state when determining authority.
+
+WorkBraid does not configure or require the bare repository's `HEAD` to point to `accepted`.
 
 Bare layout is an implementation choice, not part of the portable store contract.
 

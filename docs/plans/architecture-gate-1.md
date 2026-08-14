@@ -43,6 +43,8 @@ The minimum credible path is four sequential vertical increments. Each produces 
 
 ## Increment 1: Open and initialize a real Architecture store
 
+Detailed execution plan: [Architecture Increment 1 Execution Plan](architecture-increment-1.md).
+
 ### Purpose / user-visible capability
 
 The user can launch WorkBraid, open a real local source-repository root, see that no association is known, explicitly initialize a private Architecture store, retry an interrupted initialization against that same store, and reopen the same empty accepted Architecture after restarting the application.
@@ -51,12 +53,12 @@ The user can launch WorkBraid, open a real local source-repository root, see tha
 
 - Minimal Go process serving the initial React UI from one local origin.
 - Configurable WorkBraid application-data root, primarily to isolate tests.
-- Existing-directory source-root entry and operational path normalization.
-- Minimal SQLite source-root → store-ID association.
+- Existing-directory source-root entry and lexical operational path normalization without symlink resolution or fingerprinting.
+- Minimal SQLite source-root → store-ID association with a uniqueness constraint on the normalized source-root key.
 - Deterministic private store location derived from the store UUID.
 - Sensible project-name and source-hint defaults derived from the selected source root and shown during explicit initialization confirmation.
 - Controlled Git command runner and bare-repository initialization.
-- `architecture.yaml` creation and parsing.
+- `architecture.yaml` creation as an ordinary `100644` Git blob and parsing that rejects symlinks, gitlinks, or trees at canonical file paths.
 - Bootstrap commit and atomic creation of `refs/heads/accepted`.
 - Minimal retry of an associated incomplete initialization using the same store ID and deterministic location.
 - Empty immutable accepted snapshot.
@@ -70,7 +72,7 @@ The user can launch WorkBraid, open a real local source-repository root, see tha
 - Initialization is explicit.
 - The store ID, not the source path, identifies the store.
 - Initialization succeeds only when a valid bootstrap commit is referenced by `accepted`.
-- The bootstrap contains only `architecture.yaml`; zero components is valid.
+- The bootstrap contains only an ordinary `100644` `architecture.yaml` blob; zero components is valid.
 - Only `refs/heads/accepted` defines accepted Architecture.
 - Unsupported format/version and invalid accepted state fail clearly.
 - SQLite contains operational association state, not canonical Architecture.
@@ -81,6 +83,7 @@ The user can launch WorkBraid, open a real local source-repository root, see tha
 - Explicit initialization creates a bare private repository with one manifest-only bootstrap commit and `accepted` pointing to it.
 - Initialization confirmation uses derived project-name and source-hint defaults without requiring a separate configuration form.
 - Retrying an incomplete initialization uses its existing association, store ID, and location and never silently allocates a replacement store.
+- If retry finds an already-valid `accepted` manifest whose store ID matches the association, it loads that revision successfully rather than creating another bootstrap commit.
 - The manifest contains its stable store ID plus human-readable project association hints.
 - No `components/` directory or placeholder files are required.
 - Restarting WorkBraid resolves the SQLite association, verifies the manifest store ID, and loads the same exact accepted commit.
@@ -114,7 +117,8 @@ A human can create or edit Architecture Components through structured controls, 
 - Generated immutable UUID component IDs.
 - One Markdown file per component with YAML frontmatter, required H1 title, and Markdown body.
 - A stable creation-time filename derived from the title with collision handling; title edits never rename it.
-- Complete candidate-tree construction.
+- Closed v1 component-frontmatter parsing and non-recursive `components/*.md` discovery.
+- Complete candidate-tree construction that reuses unchanged base-tree entries/blobs exactly, preserves an edited regular file's mode, and creates canonical files as `100644` blobs.
 - Minimal structural validation across the complete candidate state.
 - Exact base-tree-to-candidate-tree unified diff.
 - Confirmation flow with current-ref check, commit creation, and atomic CAS ref advancement.
@@ -129,6 +133,8 @@ Internally, a change set holds a collection of file additions/replacements even 
 - Component identity survives title and body edits.
 - Files are self-identifying; there is no registry.
 - The required H1 is canonical title and is not duplicated in frontmatter.
+- A usable title is non-empty after trimming; load accepts CommonMark ATX or Setext H1, while WorkBraid creates ATX H1.
+- Filename generation occurs only at creation; load accepts any filename matching the v1 discovery rule.
 - Accepted Git state is unchanged until the deliberate commit succeeds.
 - Candidate state is fully constructed and validated before confirmation.
 - The reviewed diff includes all canonical changes.
@@ -143,6 +149,8 @@ Internally, a change set holds a collection of file additions/replacements even 
 - Editing its title or body preserves both its component ID and filename.
 - The complete unified diff is visible or expandable before confirmation.
 - Blank titles, malformed metadata, duplicate IDs, and malformed component files block confirmation.
+- Symlinks, gitlinks, or trees at canonical manifest/component paths are rejected; regular-file modes are preserved when editing.
+- Relationship targets resolve against the complete candidate revision before commit.
 - Validation failure retains the pending change set in the backend; a browser reload while the backend remains alive can retrieve and continue that submitted change set.
 - Advancing `accepted` externally after the pending change's base was established causes the WorkBraid commit to fail stale without changing accepted state.
 - Successful confirmation exposes the new commit identity and parent diff.
@@ -185,7 +193,7 @@ The user can create a tiny connected Architecture, read its documentation, navig
 - Relationships are source-owned authored facts with implied source IDs.
 - Targets are stable component IDs; labels are free text.
 - Multiple edges and cycles are valid.
-- All targets must resolve within the candidate Architecture.
+- All targets must resolve within the complete revision being validated: accepted on load and candidate before commit.
 - Markdown links never create Architecture relationships.
 - Raw HTML and fenced code acquire no active semantics.
 - Rendering causes no automatic arbitrary network or file access.
