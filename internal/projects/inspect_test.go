@@ -27,6 +27,7 @@ func TestInspectPathValidationAndLexicalNormalization(t *testing.T) {
 		want error
 	}{
 		{name: "empty", path: "", want: ErrPathRequired},
+		{name: "whitespace only", path: "  \t\n", want: ErrPathRequired},
 		{name: "relative", path: "project", want: ErrPathRelative},
 		{name: "missing", path: filepath.Join(root, "missing"), want: ErrPathMissing},
 		{name: "regular file", path: filePath, want: ErrPathNotDir},
@@ -50,6 +51,15 @@ func TestInspectPathValidationAndLexicalNormalization(t *testing.T) {
 	}
 	if inspection.Known {
 		t.Fatal("fresh database unexpectedly reports known association")
+	}
+
+	padded := "  " + root + "\t"
+	inspection, err = Inspect(context.Background(), db, padded)
+	if err != nil {
+		t.Fatalf("Inspect(%q): %v", padded, err)
+	}
+	if inspection.SourceRoot != filepath.Clean(root) {
+		t.Fatalf("trimmed root = %q, want %q", inspection.SourceRoot, filepath.Clean(root))
 	}
 }
 

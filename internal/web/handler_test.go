@@ -93,7 +93,7 @@ func TestOpenProjectReportsOperationalDatabaseFailure(t *testing.T) {
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), "could not inspect") {
+	if !strings.Contains(response.Body.String(), `"code":"lookup_failed"`) {
 		t.Fatalf("unexpected error body: %s", response.Body.String())
 	}
 }
@@ -111,6 +111,9 @@ func TestOpenProjectRejectsUnexpectedOrMissingOriginWithoutCORS(t *testing.T) {
 		if got := response.Header().Get("Access-Control-Allow-Origin"); got != "" {
 			t.Fatalf("origin %q: permissive CORS header = %q", origin, got)
 		}
+		if !strings.Contains(response.Body.String(), `"code":"origin_mismatch"`) {
+			t.Fatalf("origin %q: unexpected body %s", origin, response.Body.String())
+		}
 	}
 }
 
@@ -125,11 +128,12 @@ func TestOpenProjectRejectsInvalidPaths(t *testing.T) {
 	tests := []struct {
 		name string
 		path string
-		want string
+		code string
 	}{
-		{name: "relative", path: "relative/project", want: "absolute path"},
-		{name: "missing", path: filepath.Join(t.TempDir(), "missing"), want: "does not exist"},
-		{name: "regular file", path: regularFile, want: "not a directory"},
+		{name: "empty", path: "", code: "path_required"},
+		{name: "relative", path: "relative/project", code: "path_relative"},
+		{name: "missing", path: filepath.Join(t.TempDir(), "missing"), code: "path_missing"},
+		{name: "regular file", path: regularFile, code: "path_not_directory"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -137,10 +141,29 @@ func TestOpenProjectRejectsInvalidPaths(t *testing.T) {
 			if response.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 			}
-			if !strings.Contains(response.Body.String(), test.want) {
-				t.Fatalf("body = %s, want text %q", response.Body.String(), test.want)
+			if !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("body = %s, want code %q", response.Body.String(), test.code)
 			}
 		})
+	}
+}
+
+func TestOpenProjectMapsMalformedJSONToGenericFailureCode(t *testing.T) {
+	db := openWebTestDatabase(t)
+	handler := NewHandler(db, testOrigin, t.TempDir())
+
+	for _, body := range []string{`{"source_root":`, `{"source_root":"/tmp"} {}`} {
+		request := httptest.NewRequest(http.MethodPost, "/api/projects/open", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Origin", testOrigin)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("body %q: status = %d, response = %s", body, response.Code, response.Body.String())
+		}
+		if !strings.Contains(response.Body.String(), `"code":"lookup_failed"`) {
+			t.Fatalf("body %q: response = %s", body, response.Body.String())
+		}
 	}
 }
 

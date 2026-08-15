@@ -38,12 +38,21 @@ type openProjectRequest struct {
 }
 
 type errorResponse struct {
-	Error string `json:"error"`
+	Code string `json:"code"`
 }
+
+const (
+	errorPathRequired   = "path_required"
+	errorPathRelative   = "path_relative"
+	errorPathMissing    = "path_missing"
+	errorPathNotDir     = "path_not_directory"
+	errorOriginMismatch = "origin_mismatch"
+	errorLookupFailed   = "lookup_failed"
+)
 
 func (h *Handler) openProject(response http.ResponseWriter, request *http.Request) {
 	if request.Header.Get("Origin") != h.expectedOrigin {
-		writeJSON(response, http.StatusForbidden, errorResponse{Error: "request origin is not allowed"})
+		writeJSON(response, http.StatusForbidden, errorResponse{Code: errorOriginMismatch})
 		return
 	}
 
@@ -52,24 +61,27 @@ func (h *Handler) openProject(response http.ResponseWriter, request *http.Reques
 	decoder.DisallowUnknownFields()
 	var payload openProjectRequest
 	if err := decoder.Decode(&payload); err != nil {
-		writeJSON(response, http.StatusBadRequest, errorResponse{Error: "request body must be valid JSON"})
+		writeJSON(response, http.StatusBadRequest, errorResponse{Code: errorLookupFailed})
 		return
 	}
 	if err := ensureJSONEnd(decoder); err != nil {
-		writeJSON(response, http.StatusBadRequest, errorResponse{Error: "request body must contain one JSON object"})
+		writeJSON(response, http.StatusBadRequest, errorResponse{Code: errorLookupFailed})
 		return
 	}
 
 	inspection, err := projects.Inspect(request.Context(), h.db, payload.SourceRoot)
 	if err != nil {
 		switch {
-		case errors.Is(err, projects.ErrPathRequired),
-			errors.Is(err, projects.ErrPathRelative),
-			errors.Is(err, projects.ErrPathMissing),
-			errors.Is(err, projects.ErrPathNotDir):
-			writeJSON(response, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		case errors.Is(err, projects.ErrPathRequired):
+			writeJSON(response, http.StatusBadRequest, errorResponse{Code: errorPathRequired})
+		case errors.Is(err, projects.ErrPathRelative):
+			writeJSON(response, http.StatusBadRequest, errorResponse{Code: errorPathRelative})
+		case errors.Is(err, projects.ErrPathMissing):
+			writeJSON(response, http.StatusBadRequest, errorResponse{Code: errorPathMissing})
+		case errors.Is(err, projects.ErrPathNotDir):
+			writeJSON(response, http.StatusBadRequest, errorResponse{Code: errorPathNotDir})
 		default:
-			writeJSON(response, http.StatusInternalServerError, errorResponse{Error: "WorkBraid could not inspect this project"})
+			writeJSON(response, http.StatusInternalServerError, errorResponse{Code: errorLookupFailed})
 		}
 		return
 	}

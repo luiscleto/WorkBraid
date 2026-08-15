@@ -39,7 +39,7 @@ Relative paths are rejected explicitly. They must not be resolved against the ba
 
 Trim pasted paths before validation and lookup so surrounding whitespace does not turn a valid full path into a misleading error.
 
-The not-linked result must use wording equivalent to: “WorkBraid has not linked this folder to architecture yet.” It reports only the lookup and must not claim that no private store exists.
+The unlinked result must use wording equivalent to: “WorkBraid has not linked this folder to architecture.” It must not claim that no private store exists.
 
 Exact endpoint names, Go package layout, frontend component layout, configured environment/flag names, and other bounded details remain implementation choices. Keep them concrete and minimal.
 
@@ -76,7 +76,7 @@ The implementation is ready for independent review only when:
 - the built UI is served by the Go process on loopback through one origin;
 - an existing absolute directory can be submitted through the browser;
 - every relative path is rejected rather than resolved against backend process state;
-- a fresh database reports the folder as not linked yet without claiming that no store exists;
+- a fresh database reports the folder as not linked without claiming that no store exists;
 - opening it creates no association row, store UUID, private repository, or source-repository file;
 - nonexistent and non-directory paths produce clear errors;
 - a pre-seeded association is read through the real SQLite lookup;
@@ -114,7 +114,7 @@ Integrate I1.1 only after the fresh review is clear and automated checks pass. T
 3. Launch WorkBraid with a fresh temporary application-data directory.
 4. Open the built browser UI through the Go server.
 5. Submit the repository's full folder path.
-6. Confirm the UI says the folder is not linked yet and does not imply that no private store exists.
+6. Confirm the UI says the folder is not linked and does not imply that no private store exists.
 7. Attempt a relative path and confirm it is rejected.
 8. Confirm application data contains SQLite operational state but no private Architecture repository, store UUID, or association row created by opening.
 9. Submit a nonexistent path and a regular-file path and confirm clear errors.

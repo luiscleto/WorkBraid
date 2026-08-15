@@ -9,18 +9,29 @@ describe('App', () => {
     vi.restoreAllMocks()
   })
 
-  it('reports an unassociated project without claiming no store exists', async () => {
-    mockResponse({ source_root: '/tmp/example', known: false })
+  it('keeps the idle screen to one sheet without empty result chrome', () => {
     render(<App />)
 
-    await submitPath('/tmp/example')
-
-    expect(await screen.findByRole('heading', { name: 'No association known' })).toBeInTheDocument()
-    expect(screen.getByText('WorkBraid has no known Architecture store association for this project.')).toBeInTheDocument()
-    expect(screen.queryByText(/does not exist/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Open a project' })).toBeInTheDocument()
+    expect(screen.getByText('Paste the full folder path, starting with /.')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Not linked' })).not.toBeInTheDocument()
   })
 
-  it('shows a known association returned by SQLite', async () => {
+  it('reports that the folder is not linked without claiming no architecture exists', async () => {
+    const fetchMock = mockResponse({ source_root: '/tmp/example', known: false })
+    render(<App />)
+
+    await submitPath('  /tmp/example  ')
+
+    expect(await screen.findByRole('heading', { name: 'Not linked' })).toBeInTheDocument()
+    expect(screen.getByText('WorkBraid has not linked this folder to architecture.')).toBeInTheDocument()
+    expect(screen.getByText('/tmp/example')).toBeInTheDocument()
+    expect(screen.queryByText(/store (does not|doesn't) exist/i)).not.toBeInTheDocument()
+    expect(requestBody(fetchMock)).toEqual({ source_root: '/tmp/example' })
+    expect(screen.getByLabelText('Project folder')).toHaveValue('/tmp/example')
+  })
+
+  it('shows a linked folder returned by SQLite in human language', async () => {
     mockResponse({
       source_root: '/tmp/example',
       known: true,
@@ -30,41 +41,60 @@ describe('App', () => {
 
     await submitPath('/tmp/example')
 
-    expect(await screen.findByRole('heading', { name: 'Association known' })).toBeInTheDocument()
-    expect(screen.getByText('a0b38e04-54bd-464d-8a8f-8f2e78e653ea')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Linked' })).toBeInTheDocument()
+    expect(screen.getByText('WorkBraid found the architecture linked to this folder.')).toBeInTheDocument()
+    expect(screen.getByText('/tmp/example')).toBeInTheDocument()
+    expect(screen.queryByText('Architecture ID')).not.toBeInTheDocument()
+    expect(screen.queryByText('a0b38e04-54bd-464d-8a8f-8f2e78e653ea')).not.toBeInTheDocument()
   })
 
-  it('shows validation errors from the backend', async () => {
-    mockResponse({ error: 'source root must be an absolute path' }, 400)
+  it.each([
+    ['path_required', 'Enter a folder path.'],
+    ['path_relative', 'Use a full path, starting with /.'],
+    ['path_missing', 'That folder is not on this computer.'],
+    ['path_not_directory', 'That path is a file. Choose the project folder.'],
+    ['origin_mismatch', 'Open WorkBraid at the address printed in the terminal.'],
+  ])('maps backend code %s to an operator sentence', async (code, message) => {
+    mockResponse({ code }, 400)
     render(<App />)
 
-    await submitPath('relative/project')
+    await submitPath(code === 'path_required' ? '' : '/tmp/example')
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('source root must be an absolute path')
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('That path did not work')
+    expect(alert).toHaveTextContent(message)
   })
 
-  it('shows loading and backend failure states', async () => {
-    let rejectRequest: ((reason: Error) => void) | undefined
-    vi.spyOn(globalThis, 'fetch').mockImplementation(
-      () =>
-        new Promise((_resolve, reject) => {
-          rejectRequest = reject
-        }),
-    )
+  it('maps unknown response shapes and network failures to one generic sentence', async () => {
+    mockResponse({ error: 'request body must be valid JSON' }, 400)
+    const { unmount } = render(<App />)
+
+    await submitPath('/tmp/example')
+    expect(await screen.findByRole('alert')).toHaveTextContent("WorkBraid couldn't look that up. Try again.")
+
+    unmount()
+    vi.restoreAllMocks()
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('backend unavailable'))
     render(<App />)
 
-    const user = userEvent.setup()
-    await user.type(screen.getByLabelText('Absolute project-root path'), '/tmp/example')
-    await user.click(screen.getByRole('button', { name: 'Open project' }))
-    expect(screen.getByText('Checking this project…')).toBeInTheDocument()
+    await submitPath('/tmp/example')
+    expect(await screen.findByRole('alert')).toHaveTextContent("WorkBraid couldn't look that up. Try again.")
+    expect(screen.queryByText('backend unavailable')).not.toBeInTheDocument()
+  })
 
-    rejectRequest?.(new Error('backend unavailable'))
-    expect(await screen.findByRole('alert')).toHaveTextContent('backend unavailable')
+  it('shows concise lookup progress', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>(() => undefined))
+    render(<App />)
+
+    await submitPath('/tmp/example')
+
+    expect(screen.getByRole('button', { name: 'Looking up…' })).toBeDisabled()
+    expect(screen.getByText('Looking up this folder…')).toBeInTheDocument()
   })
 })
 
 function mockResponse(body: unknown, status = 200) {
-  vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+  return vi.spyOn(globalThis, 'fetch').mockResolvedValue(
     new Response(JSON.stringify(body), {
       status,
       headers: { 'Content-Type': 'application/json' },
@@ -72,8 +102,16 @@ function mockResponse(body: unknown, status = 200) {
   )
 }
 
+function requestBody(fetchMock: ReturnType<typeof mockResponse>) {
+  const options = fetchMock.mock.calls[0]?.[1]
+  return JSON.parse(String(options?.body)) as unknown
+}
+
 async function submitPath(path: string) {
   const user = userEvent.setup()
-  await user.type(screen.getByLabelText('Absolute project-root path'), path)
-  await user.click(screen.getByRole('button', { name: 'Open project' }))
+  const input = screen.getByLabelText('Project folder')
+  if (path) {
+    await user.type(input, path)
+  }
+  await user.click(screen.getByRole('button', { name: 'Open' }))
 }

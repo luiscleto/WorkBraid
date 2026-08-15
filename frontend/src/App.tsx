@@ -6,6 +6,18 @@ type Inspection = {
   store_id?: string
 }
 
+type ErrorCode =
+  | 'path_required'
+  | 'path_relative'
+  | 'path_missing'
+  | 'path_not_directory'
+  | 'origin_mismatch'
+  | 'lookup_failed'
+
+type ErrorPayload = {
+  code?: string
+}
+
 type ViewState =
   | { kind: 'idle' }
   | { kind: 'loading' }
@@ -18,85 +30,105 @@ export function App() {
 
   async function inspectProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    const trimmedSourceRoot = sourceRoot.trim()
+    setSourceRoot(trimmedSourceRoot)
     setState({ kind: 'loading' })
 
     try {
       const response = await fetch('/api/projects/open', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source_root: sourceRoot }),
+        body: JSON.stringify({ source_root: trimmedSourceRoot }),
       })
-      const result = (await response.json()) as Inspection | { error?: string }
+      const result = (await response.json()) as Inspection | ErrorPayload
       if (!response.ok) {
-        throw new Error('error' in result && result.error ? result.error : 'WorkBraid could not inspect this project')
+        setState({ kind: 'error', message: messageForError('code' in result ? result.code : undefined) })
+        return
       }
       setState({ kind: 'inspection', value: result as Inspection })
-    } catch (error) {
-      setState({
-        kind: 'error',
-        message: error instanceof Error ? error.message : 'WorkBraid could not inspect this project',
-      })
+    } catch {
+      setState({ kind: 'error', message: messageForError() })
     }
   }
 
   return (
     <main className="shell">
-      <header>
-        <p className="eyebrow">WorkBraid</p>
-        <h1>Open a project</h1>
-        <p className="introduction">
-          Choose an existing local project root to check its Architecture association. WorkBraid will not change the project.
-        </p>
-      </header>
+      <article className="sheet">
+        <header className="sheet-header">
+          <p className="eyebrow">WorkBraid</p>
+          <h1>Open a project</h1>
+          <p className="introduction">
+            Choose a project folder on this computer. WorkBraid will look for its architecture without changing the folder.
+          </p>
+        </header>
 
-      <form onSubmit={inspectProject}>
-        <label htmlFor="source-root">Absolute project-root path</label>
-        <div className="input-row">
-          <input
-            id="source-root"
-            name="source-root"
-            type="text"
-            value={sourceRoot}
-            onChange={(event) => setSourceRoot(event.target.value)}
-            placeholder="/home/alice/src/example-project"
-            autoComplete="off"
-            required
-          />
-          <button type="submit" disabled={state.kind === 'loading'}>
-            {state.kind === 'loading' ? 'Opening…' : 'Open project'}
-          </button>
-        </div>
-      </form>
+        <form onSubmit={inspectProject}>
+          <label htmlFor="source-root">Project folder</label>
+          <div className="input-row">
+            <input
+              id="source-root"
+              name="source-root"
+              type="text"
+              value={sourceRoot}
+              onChange={(event) => {
+                setSourceRoot(event.target.value)
+                setState({ kind: 'idle' })
+              }}
+              placeholder="/home/alice/src/example-project"
+              autoComplete="off"
+              aria-describedby="folder-hint"
+            />
+            <button type="submit" disabled={state.kind === 'loading'}>
+              {state.kind === 'loading' ? 'Looking up…' : 'Open'}
+            </button>
+          </div>
+          <p className="field-hint" id="folder-hint">
+            Paste the full folder path, starting with /.
+          </p>
+        </form>
 
-      <section className="result" aria-live="polite" aria-busy={state.kind === 'loading'}>
-        {state.kind === 'idle' && <p>Enter an absolute local path to begin.</p>}
-        {state.kind === 'loading' && <p>Checking this project…</p>}
-        {state.kind === 'error' && (
-          <div className="message error" role="alert">
-            <h2>Could not open project</h2>
-            <p>{state.message}</p>
-          </div>
+        {state.kind !== 'idle' && (
+          <section className={`result-note ${state.kind === 'error' ? 'error' : ''}`} aria-live="polite">
+            {state.kind === 'loading' && <p className="lookup-status">Looking up this folder…</p>}
+            {state.kind === 'error' && (
+              <div className="message" role="alert">
+                <h2>That path did not work</h2>
+                <p>{state.message}</p>
+              </div>
+            )}
+            {state.kind === 'inspection' && !state.value.known && (
+              <div className="message">
+                <h2>Not linked</h2>
+                <p>WorkBraid has not linked this folder to architecture.</p>
+                <p className="folder-path">{state.value.source_root}</p>
+              </div>
+            )}
+            {state.kind === 'inspection' && state.value.known && (
+              <div className="message">
+                <h2>Linked</h2>
+                <p>WorkBraid found the architecture linked to this folder.</p>
+                <p className="folder-path">{state.value.source_root}</p>
+              </div>
+            )}
+          </section>
         )}
-        {state.kind === 'inspection' && !state.value.known && (
-          <div className="message neutral">
-            <h2>No association known</h2>
-            <p>WorkBraid has no known Architecture store association for this project.</p>
-            <p className="path">{state.value.source_root}</p>
-          </div>
-        )}
-        {state.kind === 'inspection' && state.value.known && (
-          <div className="message known">
-            <h2>Association known</h2>
-            <p>WorkBraid knows which private Architecture store is associated with this project.</p>
-            <dl>
-              <dt>Project root</dt>
-              <dd>{state.value.source_root}</dd>
-              <dt>Store ID</dt>
-              <dd>{state.value.store_id}</dd>
-            </dl>
-          </div>
-        )}
-      </section>
+      </article>
     </main>
   )
+}
+
+const errorMessages: Record<ErrorCode, string> = {
+  path_required: 'Enter a folder path.',
+  path_relative: 'Use a full path, starting with /.',
+  path_missing: 'That folder is not on this computer.',
+  path_not_directory: 'That path is a file. Choose the project folder.',
+  origin_mismatch: 'Open WorkBraid at the address printed in the terminal.',
+  lookup_failed: "WorkBraid couldn't look that up. Try again.",
+}
+
+function messageForError(code?: string) {
+  if (code && Object.prototype.hasOwnProperty.call(errorMessages, code)) {
+    return errorMessages[code as ErrorCode]
+  }
+  return errorMessages.lookup_failed
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"workbraid/internal/associations"
 )
@@ -27,6 +28,7 @@ type Inspection struct {
 // Inspect validates a local source-root path and checks only the operational
 // association. Normalization is lexical: symlinks are not resolved.
 func Inspect(ctx context.Context, db *sql.DB, sourceRoot string) (Inspection, error) {
+	sourceRoot = strings.TrimSpace(sourceRoot)
 	if sourceRoot == "" {
 		return Inspection{}, ErrPathRequired
 	}
