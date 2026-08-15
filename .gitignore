@@ -1,1 +1,4 @@
 /kickstart-docs-to-remove
+frontend/dist/
+frontend/node_modules/
+*.db
