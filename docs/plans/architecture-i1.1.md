@@ -29,15 +29,17 @@ Implement one minimal working vertical slice:
 - SQLite accessed through `database/sql` and `modernc.org/sqlite`;
 - only the minimal source-root → store-ID association storage, with a uniqueness constraint on the normalized source-root key;
 - one explicit JSON backend operation for opening and inspecting a source root;
-- a browser flow where the user enters an existing absolute project-root path and WorkBraid reports its association state;
+- a browser flow where the user enters an existing project-folder path and WorkBraid reports whether it is linked to architecture;
 - lexical normalization for the association lookup key without resolving symlinks, fingerprinting the repository, or treating the path as durable repository identity;
-- clear loading, unassociated, invalid-path, and backend-error states;
+- clear loading, linked/not-linked, invalid-path, and backend-error states in human language rather than backend sentinel text;
 - a small same-origin boundary for the browser operation: compare its `Origin` with the server's expected loopback UI origin, reject a missing or unexpected origin, and expose no permissive CORS behavior;
 - no Git invocation against the source repository and no source-repository writes.
 
 Relative paths are rejected explicitly. They must not be resolved against the backend's working directory.
 
-The unassociated result must use wording equivalent to: “WorkBraid has no known Architecture store association for this project.” It must not claim that no private store exists.
+Trim pasted paths before validation and lookup so surrounding whitespace does not turn a valid full path into a misleading error.
+
+The not-linked result must use wording equivalent to: “WorkBraid has not linked this folder to architecture yet.” It reports only the lookup and must not claim that no private store exists.
 
 Exact endpoint names, Go package layout, frontend component layout, configured environment/flag names, and other bounded details remain implementation choices. Keep them concrete and minimal.
 
@@ -49,6 +51,7 @@ Exact endpoint names, Go package layout, frontend component layout, configured e
 - Pre-seed one association and prove lookup returns it.
 - Prove the normalized source-root uniqueness constraint prevents two store IDs for the same key.
 - Cover relative, nonexistent, and non-directory paths.
+- Cover surrounding path whitespace and prove the trimmed full path is used.
 - Cover expected, missing, and unexpected `Origin` values and verify that no permissive CORS header is emitted.
 - Cover the focused frontend states and build the production frontend.
 - Record enough source-repository state to prove the application leaves its files, tracked/untracked status, and `HEAD` unchanged.
@@ -73,7 +76,7 @@ The implementation is ready for independent review only when:
 - the built UI is served by the Go process on loopback through one origin;
 - an existing absolute directory can be submitted through the browser;
 - every relative path is rejected rather than resolved against backend process state;
-- a fresh database reports the directory as having no known association;
+- a fresh database reports the folder as not linked yet without claiming that no store exists;
 - opening it creates no association row, store UUID, private repository, or source-repository file;
 - nonexistent and non-directory paths produce clear errors;
 - a pre-seeded association is read through the real SQLite lookup;
@@ -110,8 +113,8 @@ Integrate I1.1 only after the fresh review is clear and automated checks pass. T
 2. Record its `HEAD`, `git status --short`, file list, and content checksums.
 3. Launch WorkBraid with a fresh temporary application-data directory.
 4. Open the built browser UI through the Go server.
-5. Submit the repository's absolute root.
-6. Confirm the UI says no association is known and does not imply that no private store exists.
+5. Submit the repository's full folder path.
+6. Confirm the UI says the folder is not linked yet and does not imply that no private store exists.
 7. Attempt a relative path and confirm it is rejected.
 8. Confirm application data contains SQLite operational state but no private Architecture repository, store UUID, or association row created by opening.
 9. Submit a nonexistent path and a regular-file path and confirm clear errors.
