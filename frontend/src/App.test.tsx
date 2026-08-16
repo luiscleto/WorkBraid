@@ -77,23 +77,38 @@ describe('App', () => {
     expect(requestBody(fetchMock, 1)).toEqual({ source_root: '/tmp/example' })
   })
 
-  it('opens a known link without presenting a new-setup confirmation', async () => {
+  it('opens a known architecture immediately without presenting setup controls', async () => {
+    const revision = 'b'.repeat(40)
     const fetchMock = mockResponses([
-      { ...unlinkedProject, known: true },
-      { source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: 'b'.repeat(40), component_count: 0 },
+      { source_root: '/tmp/example', project_name: 'example', state: 'empty', revision, component_count: 0 },
     ])
     render(<App />)
     await submitPath('/tmp/example')
 
-    expect(await screen.findByRole('heading', { name: 'Linked' })).toBeInTheDocument()
-    expect(screen.getByText('WorkBraid found the architecture linked to this folder.')).toBeInTheDocument()
-    expect(screen.queryByText(/Architecture ID/i)).not.toBeInTheDocument()
-
-    const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Open architecture' }))
     expect(await screen.findByRole('heading', { name: 'Architecture ready' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Set up architecture?' })).not.toBeInTheDocument()
-    expect(requestPath(fetchMock, 1)).toBe('/api/projects/initialize')
+    expect(screen.queryByRole('button', { name: /set up|retry|repair|reset/i })).not.toBeInTheDocument()
+    expect(within(screen.getByText('Technical details').closest('details') as HTMLElement).getByText(revision)).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(requestPath(fetchMock, 0)).toBe('/api/projects/open')
+  })
+
+  it.each([
+    ['architecture_unavailable', 409, 'Architecture unavailable', 'could not open the architecture linked to this project'],
+    ['architecture_invalid', 409, 'Architecture needs attention', "could not read this project's architecture"],
+    ['architecture_unsupported', 422, 'Architecture not supported yet', 'uses features that this version of WorkBraid cannot open yet'],
+  ])('shows open failure %s in product language without recovery controls', async (code, status, heading, message) => {
+    mockResponses([{ code }], [status])
+    render(<App />)
+    await submitPath('/tmp/example')
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(heading)
+    expect(alert).toHaveTextContent(message)
+    expect(alert).toHaveTextContent('/tmp/example')
+    expect(screen.queryByText('This project has an empty architecture.')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /retry|repair|reset|create|set up/i })).not.toBeInTheDocument()
+    expect(alert.textContent ?? '').not.toMatch(/\b(association|store|manifest|accepted ref|canonical|snapshot|uuid|git object)\b/i)
   })
 
   it('keeps an incomplete setup retryable in the same running application', async () => {
@@ -146,7 +161,7 @@ describe('App', () => {
   })
 
   it.each([
-    ['architecture_invalid', 409, 'Architecture needs attention', 'files conflict with the expected format'],
+    ['architecture_invalid', 409, 'Architecture needs attention', "could not read this project's architecture"],
     ['architecture_unsupported', 422, 'Architecture not supported yet', 'contains components that this version of WorkBraid cannot open yet'],
   ])('shows %s clearly without pretending an empty architecture loaded', async (code, status, heading, message) => {
     mockResponses([unlinkedProject, { code }], [200, status])

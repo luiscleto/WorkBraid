@@ -21,6 +21,7 @@ const (
 
 var (
 	ErrIncomplete  = errors.New("Architecture setup is incomplete")
+	ErrUnavailable = errors.New("Architecture is unavailable")
 	ErrInvalid     = errors.New("Architecture store is invalid")
 	ErrUnsupported = errors.New("Architecture components are not supported yet")
 )
@@ -65,6 +66,42 @@ func (manager *Manager) StorePath(storeID string) (string, error) {
 		return "", fmt.Errorf("%w: associated store ID is not a UUID", ErrInvalid)
 	}
 	return filepath.Join(manager.storeRoot, id.String()+".git"), nil
+}
+
+// LoadAccepted reads the exact Architecture revision named by accepted. It is
+// deliberately read-only: missing repositories or refs remain missing, and no
+// other ref or object is considered as a fallback authority.
+func (manager *Manager) LoadAccepted(ctx context.Context, storeID string) (Snapshot, error) {
+	parsedStoreID, err := uuid.Parse(storeID)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("%w: associated store ID is not a UUID", ErrInvalid)
+	}
+	storePath, _ := manager.StorePath(parsedStoreID.String())
+
+	info, err := os.Stat(storePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return Snapshot{}, fmt.Errorf("%w: private Architecture location is missing", ErrUnavailable)
+	}
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("%w: inspect private Architecture location: %v", ErrUnavailable, err)
+	}
+	if !info.IsDir() {
+		return Snapshot{}, fmt.Errorf("%w: private Architecture location is not a directory", ErrInvalid)
+	}
+
+	bare, err := manager.git.isBare(ctx, storePath)
+	if err != nil || !bare {
+		return Snapshot{}, fmt.Errorf("%w: private Architecture location is not a compatible bare Git repository", ErrInvalid)
+	}
+	revision, present, err := manager.git.resolveRef(ctx, storePath, acceptedRef)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("%w: observe accepted Architecture: %v", ErrInvalid, err)
+	}
+	if !present {
+		return Snapshot{}, fmt.Errorf("%w: accepted Architecture is missing", ErrUnavailable)
+	}
+
+	return manager.load(ctx, storePath, parsedStoreID, revision)
 }
 
 // InitializeOrLoad completes a compatible manifest-only bootstrap or loads the
@@ -222,10 +259,6 @@ func (manager *Manager) load(ctx context.Context, storePath string, expectedStor
 	if componentsTreePresent && !componentsPresent {
 		return Snapshot{}, fmt.Errorf("%w: accepted tree contains an empty components directory", ErrInvalid)
 	}
-	if componentsPresent {
-		return Snapshot{}, ErrUnsupported
-	}
-
 	contents, err := manager.git.readBlob(ctx, storePath, manifestEntry.Object)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("%w: read architecture.yaml: %v", ErrInvalid, err)
@@ -237,6 +270,9 @@ func (manager *Manager) load(ctx context.Context, storePath string, expectedStor
 	manifestStoreID, err := uuid.Parse(parsed.StoreID)
 	if err != nil || manifestStoreID != expectedStoreID {
 		return Snapshot{}, fmt.Errorf("%w: Architecture identity does not match this project", ErrInvalid)
+	}
+	if componentsPresent {
+		return Snapshot{}, ErrUnsupported
 	}
 	return Snapshot{storeID: expectedStoreID, revision: revision, componentCount: 0}, nil
 }

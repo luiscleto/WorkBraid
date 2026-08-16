@@ -1,6 +1,22 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"io/fs"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestOriginForLoopbackAddress(t *testing.T) {
 	t.Parallel()
@@ -36,4 +52,254 @@ func TestOriginForLoopbackAddress(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRealProcessRestartReopensExactAcceptedArchitecture(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and restarts the real WorkBraid process")
+	}
+
+	binary := filepath.Join(t.TempDir(), "workbraid")
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build WorkBraid: %v\n%s", err, output)
+	}
+	dataDirectory := t.TempDir()
+	uiDirectory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(uiDirectory, "index.html"), []byte("<main>WorkBraid</main>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := createProcessTestSourceRepository(t)
+	sourceBefore := snapshotProcessTestSource(t, source)
+
+	processA := startWorkBraidProcess(t, binary, dataDirectory, uiDirectory)
+	opened := postProcessJSON(t, processA.origin, "/api/projects/open", source)
+	if opened.status != http.StatusOK || !strings.Contains(opened.body, `"known":false`) {
+		t.Fatalf("initial open status=%d body=%s", opened.status, opened.body)
+	}
+	initialized := postProcessJSON(t, processA.origin, "/api/projects/initialize", source)
+	if initialized.status != http.StatusOK {
+		t.Fatalf("initialize status=%d body=%s", initialized.status, initialized.body)
+	}
+	var first struct {
+		Revision       string `json:"revision"`
+		State          string `json:"state"`
+		ComponentCount int    `json:"component_count"`
+	}
+	if err := json.Unmarshal([]byte(initialized.body), &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.Revision == "" || first.State != "empty" || first.ComponentCount != 0 {
+		t.Fatalf("unexpected initialized Architecture: %+v", first)
+	}
+	processA.stop(t)
+	if sourceAfterShutdown := snapshotProcessTestSource(t, source); sourceAfterShutdown != sourceBefore {
+		t.Fatalf("source repository changed before restart\nbefore:\n%s\nafter process A:\n%s", sourceBefore, sourceAfterShutdown)
+	}
+
+	storeID := processTestStoreID(t, filepath.Join(dataDirectory, "workbraid.db"), filepath.Clean(source))
+	storePath := filepath.Join(dataDirectory, "architecture", storeID+".git")
+	if accepted := processTestGit(t, source, "--git-dir", storePath, "show-ref", "--verify", "--hash", "refs/heads/accepted"); accepted != first.Revision {
+		t.Fatalf("accepted=%q initialized=%q", accepted, first.Revision)
+	}
+
+	processB := startWorkBraidProcess(t, binary, dataDirectory, uiDirectory)
+	reopened := postProcessJSON(t, processB.origin, "/api/projects/open", source)
+	if reopened.status != http.StatusOK {
+		t.Fatalf("reopen status=%d body=%s", reopened.status, reopened.body)
+	}
+	var second struct {
+		Revision       string `json:"revision"`
+		State          string `json:"state"`
+		ComponentCount int    `json:"component_count"`
+	}
+	if err := json.Unmarshal([]byte(reopened.body), &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.Revision != first.Revision || second.State != "empty" || second.ComponentCount != 0 {
+		t.Fatalf("restarted Architecture=%+v original=%+v", second, first)
+	}
+	processB.stop(t)
+	if storeIDAfter := processTestStoreID(t, filepath.Join(dataDirectory, "workbraid.db"), filepath.Clean(source)); storeIDAfter != storeID {
+		t.Fatalf("restart changed architecture link from %q to %q", storeID, storeIDAfter)
+	}
+
+	if sourceAfter := snapshotProcessTestSource(t, source); sourceAfter != sourceBefore {
+		t.Fatalf("source repository changed across process restart\nbefore:\n%s\nafter:\n%s", sourceBefore, sourceAfter)
+	}
+}
+
+type workBraidProcess struct {
+	command *exec.Cmd
+	done    chan error
+	logs    *bytes.Buffer
+	origin  string
+	stopped bool
+}
+
+func startWorkBraidProcess(t *testing.T, binary, dataDirectory, uiDirectory string) *workBraidProcess {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	origin := "http://" + address
+	logs := &bytes.Buffer{}
+	command := exec.Command(binary, "-listen", address, "-data-dir", dataDirectory, "-ui-dir", uiDirectory)
+	command.Stdout = logs
+	command.Stderr = logs
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	running := &workBraidProcess{command: command, done: make(chan error, 1), logs: logs, origin: origin}
+	go func() { running.done <- command.Wait() }()
+	t.Cleanup(func() { running.stop(t) })
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		response, err := http.Get(origin + "/")
+		if err == nil {
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return running
+			}
+		}
+		select {
+		case err := <-running.done:
+			running.stopped = true
+			t.Fatalf("WorkBraid exited before readiness: %v\n%s", err, logs.String())
+		default:
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	running.stop(t)
+	t.Fatalf("WorkBraid did not become ready\n%s", logs.String())
+	return nil
+}
+
+func (process *workBraidProcess) stop(t *testing.T) {
+	t.Helper()
+	if process == nil || process.stopped {
+		return
+	}
+	process.stopped = true
+	if err := process.command.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("stop WorkBraid: %v", err)
+	}
+	select {
+	case <-process.done:
+		return
+	case <-time.After(5 * time.Second):
+		if err := process.command.Process.Kill(); err != nil {
+			t.Fatalf("kill WorkBraid after stop timeout: %v", err)
+		}
+		<-process.done
+	}
+}
+
+type processResponse struct {
+	status int
+	body   string
+}
+
+func postProcessJSON(t *testing.T, origin, path, sourceRoot string) processResponse {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"source_root": sourceRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, origin+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", origin)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var responseBody bytes.Buffer
+	if _, err := responseBody.ReadFrom(response.Body); err != nil {
+		t.Fatal(err)
+	}
+	return processResponse{status: response.StatusCode, body: responseBody.String()}
+}
+
+func createProcessTestSourceRepository(t *testing.T) string {
+	t.Helper()
+	repository := t.TempDir()
+	processTestGit(t, repository, "init", "--quiet")
+	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("tracked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	processTestGit(t, repository, "add", "tracked.txt")
+	processTestGit(t, repository, "-c", "user.name=WorkBraid Test", "-c", "user.email=test@workbraid.invalid", "commit", "--quiet", "-m", "source fixture")
+	if err := os.WriteFile(filepath.Join(repository, "untracked.txt"), []byte("untracked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func snapshotProcessTestSource(t *testing.T, repository string) string {
+	t.Helper()
+	head := processTestGit(t, repository, "rev-parse", "HEAD")
+	status := processTestGit(t, repository, "status", "--short")
+	var files []string
+	err := filepath.WalkDir(repository, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(repository, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if relative == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(contents)
+		files = append(files, relative+":"+hex.EncodeToString(sum[:]))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(files)
+	return strings.Join([]string{head, status, strings.Join(files, "\n")}, "\n---\n")
+}
+
+func processTestStoreID(t *testing.T, databasePath, sourceRoot string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var storeID string
+	if err := db.QueryRow(`SELECT store_id FROM source_architecture_associations WHERE normalized_source_root = ?`, sourceRoot).Scan(&storeID); err != nil {
+		t.Fatal(err)
+	}
+	return storeID
+}
+
+func processTestGit(t *testing.T, directory string, arguments ...string) string {
+	t.Helper()
+	command := exec.Command("git", arguments...)
+	command.Dir = directory
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", arguments, err, output)
+	}
+	return strings.TrimSpace(string(output))
 }

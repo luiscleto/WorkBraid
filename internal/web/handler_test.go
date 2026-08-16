@@ -149,6 +149,180 @@ func TestInitializeProjectCreatesOneAcceptedBootstrapAndLeavesSourceUntouched(t 
 	}
 }
 
+func TestNewApplicationInstanceReopensExactAcceptedEmptyArchitecture(t *testing.T) {
+	repository := createSourceRepository(t)
+	sourceBefore := snapshotRepository(t, repository)
+	dataDirectory := t.TempDir()
+	databasePath := filepath.Join(dataDirectory, "workbraid.db")
+	dbA := openWebDatabaseAt(t, databasePath)
+	handlerA := NewHandler(dbA, testOrigin, t.TempDir(), dataDirectory)
+
+	initialized := postInitializeProject(t, handlerA, testOrigin, repository)
+	if initialized.Code != http.StatusOK {
+		t.Fatalf("initialize status=%d body=%s", initialized.Code, initialized.Body.String())
+	}
+	var original struct {
+		Revision       string `json:"revision"`
+		State          string `json:"state"`
+		ComponentCount int    `json:"component_count"`
+	}
+	if err := json.Unmarshal(initialized.Body.Bytes(), &original); err != nil {
+		t.Fatal(err)
+	}
+	if original.Revision == "" || original.State != "empty" || original.ComponentCount != 0 {
+		t.Fatalf("unexpected initialized Architecture: %+v", original)
+	}
+	storeID := associatedStoreID(t, dbA, filepath.Clean(repository))
+	storePath := filepath.Join(dataDirectory, "architecture", storeID+".git")
+	gitBefore := snapshotPrivateArchitecture(t, dataDirectory)
+	associationsBefore := snapshotAssociations(t, dbA)
+	if err := dbA.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A new database connection, manager, handler, and in-memory snapshot prove
+	// this is application reconstruction rather than reuse of handler state.
+	dbB := openWebDatabaseAt(t, databasePath)
+	handlerB := NewHandler(dbB, testOrigin, t.TempDir(), dataDirectory)
+	reopened := postOpenProject(t, handlerB, testOrigin, repository)
+	if reopened.Code != http.StatusOK {
+		t.Fatalf("reopen status=%d body=%s", reopened.Code, reopened.Body.String())
+	}
+	var loaded struct {
+		Revision       string `json:"revision"`
+		State          string `json:"state"`
+		ComponentCount int    `json:"component_count"`
+	}
+	if err := json.Unmarshal(reopened.Body.Bytes(), &loaded); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Revision != original.Revision || loaded.State != "empty" || loaded.ComponentCount != 0 {
+		t.Fatalf("reopened Architecture = %+v, original = %+v", loaded, original)
+	}
+	if accepted := runGit(t, dataDirectory, "--git-dir", storePath, "show-ref", "--verify", "--hash", "refs/heads/accepted"); accepted != loaded.Revision {
+		t.Fatalf("accepted=%q reopened=%q", accepted, loaded.Revision)
+	}
+	if after := snapshotPrivateArchitecture(t, dataDirectory); after != gitBefore {
+		t.Fatalf("reopen changed private Architecture\nbefore:\n%s\nafter:\n%s", gitBefore, after)
+	}
+	if after := snapshotAssociations(t, dbB); after != associationsBefore {
+		t.Fatalf("reopen changed associations\nbefore:\n%s\nafter:\n%s", associationsBefore, after)
+	}
+	if sourceAfter := snapshotRepository(t, repository); sourceAfter != sourceBefore {
+		t.Fatalf("source repository changed\nbefore:\n%s\nafter:\n%s", sourceBefore, sourceAfter)
+	}
+}
+
+func TestOpenProjectBoundedAcceptedStateFailuresAreReadOnly(t *testing.T) {
+	tests := []struct {
+		name       string
+		wantStatus int
+		wantCode   string
+		arrange    func(t *testing.T, dataDirectory, storePath, storeID, revision string)
+	}{
+		{
+			name:       "associated private location missing",
+			wantStatus: http.StatusConflict,
+			wantCode:   errorArchitectureUnavailable,
+			arrange: func(t *testing.T, _, storePath, _, _ string) {
+				if err := os.Rename(storePath, storePath+".fixture-away"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:       "missing accepted ignores plausible fallback",
+			wantStatus: http.StatusConflict,
+			wantCode:   errorArchitectureUnavailable,
+			arrange: func(t *testing.T, dataDirectory, storePath, _, revision string) {
+				runGit(t, dataDirectory, "--git-dir", storePath, "update-ref", "refs/heads/plausible", revision)
+				runGit(t, dataDirectory, "--git-dir", storePath, "symbolic-ref", "HEAD", "refs/heads/plausible")
+				runGit(t, dataDirectory, "--git-dir", storePath, "update-ref", "-d", "refs/heads/accepted", revision)
+			},
+		},
+		{
+			name:       "unsupported manifest version",
+			wantStatus: http.StatusConflict,
+			wantCode:   errorArchitectureInvalid,
+			arrange: func(t *testing.T, dataDirectory, storePath, _, revision string) {
+				manifest := runGit(t, dataDirectory, "--git-dir", storePath, "show", revision+":architecture.yaml")
+				manifest = strings.Replace(manifest, "version: 1", "version: 2", 1) + "\n"
+				advanceAcceptedToManifest(t, storePath, revision, []byte(manifest), nil)
+			},
+		},
+		{
+			name:       "manifest identity mismatch",
+			wantStatus: http.StatusConflict,
+			wantCode:   errorArchitectureInvalid,
+			arrange: func(t *testing.T, _ string, storePath, _ string, revision string) {
+				manifest := []byte("format: workbraid-architecture\nversion: 1\nstore_id: \"" + uuid.NewString() + "\"\nproject:\n  name: Project\n  source_hint: /tmp/project\n")
+				advanceAcceptedToManifest(t, storePath, revision, manifest, nil)
+			},
+		},
+		{
+			name:       "component-bearing v1 is unsupported",
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   errorArchitectureUnsupported,
+			arrange: func(t *testing.T, dataDirectory, storePath, _ string, revision string) {
+				manifest := []byte(runGit(t, dataDirectory, "--git-dir", storePath, "show", revision+":architecture.yaml") + "\n")
+				component := []byte("---\nid: \"" + uuid.NewString() + "\"\nrelationships: []\n---\n# Component\n")
+				advanceAcceptedToManifest(t, storePath, revision, manifest, component)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := createSourceRepository(t)
+			sourceBefore := snapshotRepository(t, repository)
+			dataDirectory := t.TempDir()
+			databasePath := filepath.Join(dataDirectory, "workbraid.db")
+			dbA := openWebDatabaseAt(t, databasePath)
+			handlerA := NewHandler(dbA, testOrigin, t.TempDir(), dataDirectory)
+			initialized := postInitializeProject(t, handlerA, testOrigin, repository)
+			if initialized.Code != http.StatusOK {
+				t.Fatalf("initialize status=%d body=%s", initialized.Code, initialized.Body.String())
+			}
+			var initial struct {
+				Revision string `json:"revision"`
+			}
+			if err := json.Unmarshal(initialized.Body.Bytes(), &initial); err != nil {
+				t.Fatal(err)
+			}
+			storeID := associatedStoreID(t, dbA, filepath.Clean(repository))
+			storePath := filepath.Join(dataDirectory, "architecture", storeID+".git")
+			test.arrange(t, dataDirectory, storePath, storeID, initial.Revision)
+			privateBefore := snapshotPrivateArchitecture(t, dataDirectory)
+			associationsBefore := snapshotAssociations(t, dbA)
+			if err := dbA.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			dbB := openWebDatabaseAt(t, databasePath)
+			handlerB := NewHandler(dbB, testOrigin, t.TempDir(), dataDirectory)
+			response := postOpenProject(t, handlerB, testOrigin, repository)
+			if response.Code != test.wantStatus || !strings.Contains(response.Body.String(), `"code":"`+test.wantCode+`"`) {
+				t.Fatalf("open status=%d body=%s", response.Code, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), `"state":"empty"`) || strings.Contains(response.Body.String(), `"revision":`) {
+				t.Fatalf("failed open presented accepted Architecture: %s", response.Body.String())
+			}
+			if got := response.Header().Get("Access-Control-Allow-Origin"); got != "" {
+				t.Fatalf("permissive CORS header = %q", got)
+			}
+			if privateAfter := snapshotPrivateArchitecture(t, dataDirectory); privateAfter != privateBefore {
+				t.Fatalf("failed open changed private Architecture\nbefore:\n%s\nafter:\n%s", privateBefore, privateAfter)
+			}
+			if associationsAfter := snapshotAssociations(t, dbB); associationsAfter != associationsBefore {
+				t.Fatalf("failed open changed associations\nbefore:\n%s\nafter:\n%s", associationsBefore, associationsAfter)
+			}
+			if sourceAfter := snapshotRepository(t, repository); sourceAfter != sourceBefore {
+				t.Fatalf("failed open changed source repository\nbefore:\n%s\nafter:\n%s", sourceBefore, sourceAfter)
+			}
+		})
+	}
+}
+
 func TestInitializeProjectRetainsAssociationAndRetriesSameStore(t *testing.T) {
 	db := openWebTestDatabase(t)
 	repository := createSourceRepository(t)
@@ -317,7 +491,7 @@ func TestInitializeProjectReportsInvalidAndUnsupportedAcceptedStates(t *testing.
 	}
 }
 
-func TestOpenProjectReturnsPreseededAssociation(t *testing.T) {
+func TestOpenProjectDoesNotInitializeAPreseededMissingArchitecture(t *testing.T) {
 	db := openWebTestDatabase(t)
 	repository := t.TempDir()
 	const storeID = "a0b38e04-54bd-464d-8a8f-8f2e78e653ea"
@@ -328,12 +502,20 @@ func TestOpenProjectReturnsPreseededAssociation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	response := postOpenProject(t, newTestHandler(t, db), testOrigin, repository)
-	if response.Code != http.StatusOK {
+	dataDirectory := t.TempDir()
+	response := postOpenProject(t, NewHandler(db, testOrigin, t.TempDir(), dataDirectory), testOrigin, repository)
+	if response.Code != http.StatusConflict {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), `"known":true`) || !strings.Contains(response.Body.String(), storeID) {
-		t.Fatalf("response does not contain seeded association: %s", response.Body.String())
+	if !strings.Contains(response.Body.String(), `"code":"architecture_unavailable"`) {
+		t.Fatalf("response does not report unavailable Architecture: %s", response.Body.String())
+	}
+	storePath := filepath.Join(dataDirectory, "architecture", storeID+".git")
+	if _, err := os.Stat(storePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("open created or changed missing private Architecture location: %v", err)
+	}
+	if got := associatedStoreID(t, db, filepath.Clean(repository)); got != storeID {
+		t.Fatalf("open changed associated ID to %q", got)
 	}
 }
 
@@ -489,9 +671,95 @@ func assertAssociationCount(t *testing.T, db *sql.DB, want int) {
 	}
 }
 
+func snapshotAssociations(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	rows, err := db.Query(`SELECT normalized_source_root, store_id FROM source_architecture_associations ORDER BY normalized_source_root`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var values []string
+	for rows.Next() {
+		var sourceRoot, storeID string
+		if err := rows.Scan(&sourceRoot, &storeID); err != nil {
+			t.Fatal(err)
+		}
+		values = append(values, sourceRoot+"\x00"+storeID)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(values, "\n")
+}
+
+func snapshotPrivateArchitecture(t *testing.T, dataDirectory string) string {
+	t.Helper()
+	root := filepath.Join(dataDirectory, "architecture")
+	if _, err := os.Stat(root); errors.Is(err, os.ErrNotExist) {
+		return "<missing>"
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	var entries []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			entries = append(entries, "directory "+relative+" "+info.Mode().String())
+			return nil
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(contents)
+		entries = append(entries, "file "+relative+" "+info.Mode().String()+" "+hex.EncodeToString(sum[:]))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(entries)
+	return strings.Join(entries, "\n")
+}
+
+func advanceAcceptedToManifest(t *testing.T, storePath, oldRevision string, manifest, component []byte) string {
+	t.Helper()
+	manifestBlob := runGitWithInput(t, storePath, manifest, "--git-dir", storePath, "hash-object", "-w", "--stdin")
+	rootEntries := "100644 blob " + manifestBlob + "\tarchitecture.yaml\n"
+	if component != nil {
+		componentBlob := runGitWithInput(t, storePath, component, "--git-dir", storePath, "hash-object", "-w", "--stdin")
+		componentTree := runGitWithInput(t, storePath, []byte("100644 blob "+componentBlob+"\tcomponent.md\n"), "--git-dir", storePath, "mktree")
+		rootEntries += "040000 tree " + componentTree + "\tcomponents\n"
+	}
+	tree := runGitWithInput(t, storePath, []byte(rootEntries), "--git-dir", storePath, "mktree")
+	commit := runGitWithInput(t, storePath, []byte("external accepted state\n"),
+		"-c", "user.name=Test", "-c", "user.email=test@workbraid.invalid",
+		"--git-dir", storePath, "commit-tree", tree, "-p", oldRevision)
+	runGit(t, storePath, "--git-dir", storePath, "update-ref", "refs/heads/accepted", commit, oldRevision)
+	return commit
+}
+
 func openWebTestDatabase(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "workbraid.db"))
+	return openWebDatabaseAt(t, filepath.Join(t.TempDir(), "workbraid.db"))
+}
+
+func openWebDatabaseAt(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}

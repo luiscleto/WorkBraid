@@ -60,6 +60,7 @@ const (
 	errorOriginMismatch          = "origin_mismatch"
 	errorLookupFailed            = "lookup_failed"
 	errorSetupIncomplete         = "setup_incomplete"
+	errorArchitectureUnavailable = "architecture_unavailable"
 	errorArchitectureInvalid     = "architecture_invalid"
 	errorArchitectureUnsupported = "architecture_unsupported"
 )
@@ -88,11 +89,32 @@ func (h *Handler) openProject(response http.ResponseWriter, request *http.Reques
 		writeProjectError(response, err)
 		return
 	}
+	if !inspection.Known {
+		writeJSON(response, http.StatusOK, inspection)
+		return
+	}
+	if err := h.architecture.ValidateSourceIsolation(inspection.SourceRoot); err != nil {
+		writeJSON(response, http.StatusConflict, errorResponse{Code: errorArchitectureInvalid})
+		return
+	}
 
-	writeJSON(response, http.StatusOK, inspection)
+	snapshot, err := h.architecture.LoadAccepted(request.Context(), inspection.StoreID)
+	if err != nil {
+		writeArchitectureLoadError(response, err)
+		return
+	}
+	h.publishSnapshot(snapshot)
+
+	writeJSON(response, http.StatusOK, architectureResponse{
+		SourceRoot:     inspection.SourceRoot,
+		ProjectName:    inspection.ProjectName,
+		State:          "empty",
+		Revision:       snapshot.Revision(),
+		ComponentCount: snapshot.ComponentCount(),
+	})
 }
 
-type initializeProjectResponse struct {
+type architectureResponse struct {
 	SourceRoot     string `json:"source_root"`
 	ProjectName    string `json:"project_name"`
 	State          string `json:"state"`
@@ -156,16 +178,31 @@ func (h *Handler) initializeProject(response http.ResponseWriter, request *http.
 		return
 	}
 
-	h.snapshotMutex.Lock()
-	h.loadedSnapshot = &snapshot
-	h.snapshotMutex.Unlock()
-	writeJSON(response, http.StatusOK, initializeProjectResponse{
+	h.publishSnapshot(snapshot)
+	writeJSON(response, http.StatusOK, architectureResponse{
 		SourceRoot:     inspection.SourceRoot,
 		ProjectName:    inspection.ProjectName,
 		State:          "empty",
 		Revision:       snapshot.Revision(),
 		ComponentCount: snapshot.ComponentCount(),
 	})
+}
+
+func (h *Handler) publishSnapshot(snapshot architecture.Snapshot) {
+	h.snapshotMutex.Lock()
+	h.loadedSnapshot = &snapshot
+	h.snapshotMutex.Unlock()
+}
+
+func writeArchitectureLoadError(response http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, architecture.ErrUnavailable):
+		writeJSON(response, http.StatusConflict, errorResponse{Code: errorArchitectureUnavailable})
+	case errors.Is(err, architecture.ErrUnsupported):
+		writeJSON(response, http.StatusUnprocessableEntity, errorResponse{Code: errorArchitectureUnsupported})
+	default:
+		writeJSON(response, http.StatusConflict, errorResponse{Code: errorArchitectureInvalid})
+	}
 }
 
 func writeProjectError(response http.ResponseWriter, err error) {

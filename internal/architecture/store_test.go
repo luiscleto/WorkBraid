@@ -54,7 +54,7 @@ func TestInitializeCreatesAndLoadsExactBootstrap(t *testing.T) {
 	}
 
 	gitText(t, "--git-dir", storePath, "symbolic-ref", "HEAD", "refs/heads/unrelated")
-	reloaded, err := manager.InitializeOrLoad(context.Background(), storeID, "Ignored", "/ignored")
+	reloaded, err := NewManager(dataDirectory).LoadAccepted(context.Background(), storeID)
 	if err != nil {
 		t.Fatalf("load with unrelated HEAD: %v", err)
 	}
@@ -99,6 +99,47 @@ func TestIncompleteInitializationRetriesAtSameLocation(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptedLeavesMissingStoreMissing(t *testing.T) {
+	dataDirectory := t.TempDir()
+	manager := NewManager(dataDirectory)
+	storeID := uuid.NewString()
+	storePath, _ := manager.StorePath(storeID)
+
+	_, err := manager.LoadAccepted(context.Background(), storeID)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("missing store error = %v, want unavailable", err)
+	}
+	if _, err := os.Stat(storePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only load created missing store: %v", err)
+	}
+}
+
+func TestLoadAcceptedNeverFallsBackFromMissingAccepted(t *testing.T) {
+	dataDirectory := t.TempDir()
+	manager := NewManager(dataDirectory)
+	storeID := uuid.NewString()
+	snapshot, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath, _ := manager.StorePath(storeID)
+	gitText(t, "--git-dir", storePath, "update-ref", "refs/heads/plausible", snapshot.Revision())
+	gitText(t, "--git-dir", storePath, "symbolic-ref", "HEAD", "refs/heads/plausible")
+	gitText(t, "--git-dir", storePath, "update-ref", "-d", acceptedRef, snapshot.Revision())
+	before := acceptedAuthorityState(t, storePath)
+
+	_, err = NewManager(dataDirectory).LoadAccepted(context.Background(), storeID)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("missing accepted error = %v, want unavailable", err)
+	}
+	if after := acceptedAuthorityState(t, storePath); after != before {
+		t.Fatalf("read-only load changed private repository\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if _, present, err := manager.git.resolveRef(context.Background(), storePath, acceptedRef); err != nil || present {
+		t.Fatalf("accepted was recreated: present=%t err=%v", present, err)
+	}
+}
+
 func TestRetryCompletesAnEmptyAssociatedStoreDirectory(t *testing.T) {
 	manager := NewManager(t.TempDir())
 	storeID := uuid.NewString()
@@ -135,7 +176,7 @@ func TestLoadRejectsIdentityMismatchWithoutChangingAccepted(t *testing.T) {
 	wrongCommit := commitManifestTree(t, storePath, wrongManifest, "100644", nil)
 	gitText(t, "--git-dir", storePath, "update-ref", acceptedRef, wrongCommit, snapshot.Revision())
 
-	_, err = manager.InitializeOrLoad(context.Background(), associatedID, "Project", "/tmp/project")
+	_, err = manager.LoadAccepted(context.Background(), associatedID)
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("mismatch error = %v, want invalid", err)
 	}
@@ -156,7 +197,7 @@ func TestLoadRejectsNonStringRecoveryHintsFromAcceptedGitTree(t *testing.T) {
 	commit := commitManifestTree(t, storePath, typedManifest, "100644", nil)
 	gitText(t, "--git-dir", storePath, "update-ref", acceptedRef, commit, snapshot.Revision())
 
-	loaded, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
+	loaded, err := manager.LoadAccepted(context.Background(), storeID)
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("typed recovery hints load = (%+v, %v), want invalid", loaded, err)
 	}
@@ -180,7 +221,7 @@ func TestLoadReportsComponentBearingV1TreeAsUnsupported(t *testing.T) {
 	commit := commitManifestTree(t, storePath, manifestBytes, "100644", []string{"040000 tree " + componentTree + "\tcomponents"})
 	gitText(t, "--git-dir", storePath, "update-ref", acceptedRef, commit, snapshot.Revision())
 
-	_, err = manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
+	_, err = manager.LoadAccepted(context.Background(), storeID)
 	if !errors.Is(err, ErrUnsupported) || errors.Is(err, ErrInvalid) {
 		t.Fatalf("component-bearing tree error = %v, want unsupported and not invalid", err)
 	}
@@ -369,4 +410,12 @@ func gitBytes(t *testing.T, arguments ...string) []byte {
 		t.Fatalf("git %v: %v", arguments, err)
 	}
 	return output
+}
+
+func acceptedAuthorityState(t *testing.T, repository string) string {
+	t.Helper()
+	refs := gitText(t, "--git-dir", repository, "for-each-ref", "--format=%(refname) %(objectname)")
+	head := gitText(t, "--git-dir", repository, "symbolic-ref", "-q", "HEAD")
+	objects := gitText(t, "--git-dir", repository, "rev-list", "--objects", "--all")
+	return strings.Join([]string{head, refs, objects}, "\n---\n")
 }
