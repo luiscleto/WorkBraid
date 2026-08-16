@@ -165,6 +165,28 @@ func TestLoadReportsComponentBearingV1TreeAsUnsupported(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsEmptyComponentsTreeInsteadOfLoadingEmptySnapshot(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	storeID := uuid.NewString()
+	snapshot, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath, _ := manager.StorePath(storeID)
+	manifestBytes := gitBytes(t, "--git-dir", storePath, "show", snapshot.Revision()+":architecture.yaml")
+	emptyComponentsTree := mktree(t, storePath, "")
+	commit := commitManifestTree(t, storePath, manifestBytes, "100644", []string{"040000 tree " + emptyComponentsTree + "\tcomponents"})
+	gitText(t, "--git-dir", storePath, "update-ref", acceptedRef, commit, snapshot.Revision())
+
+	loaded, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
+	if !errors.Is(err, ErrInvalid) || errors.Is(err, ErrUnsupported) {
+		t.Fatalf("empty components tree load = (%+v, %v), want invalid and not unsupported", loaded, err)
+	}
+	if accepted := gitText(t, "--git-dir", storePath, "show-ref", "--verify", "--hash", acceptedRef); accepted != commit {
+		t.Fatalf("failed load changed accepted from %q to %q", commit, accepted)
+	}
+}
+
 func TestLoadRejectsNonOrdinaryManifestPath(t *testing.T) {
 	for _, kind := range []string{"tree", "symlink"} {
 		t.Run(kind, func(t *testing.T) {

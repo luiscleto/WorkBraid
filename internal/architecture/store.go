@@ -194,6 +194,7 @@ func (manager *Manager) load(ctx context.Context, storePath string, expectedStor
 	}
 
 	var manifestEntry *treeEntry
+	componentsTreePresent := false
 	componentsPresent := false
 	for index := range entries {
 		entry := entries[index]
@@ -204,7 +205,7 @@ func (manager *Manager) load(ctx context.Context, storePath string, expectedStor
 			}
 			manifestEntry = &entry
 		case entry.Path == "components" && entry.Type == "tree":
-			// The directory entry itself is permitted when direct component files exist.
+			componentsTreePresent = true
 		case strings.HasPrefix(entry.Path, "components/"):
 			relative := strings.TrimPrefix(entry.Path, "components/")
 			if strings.Contains(relative, "/") || !strings.HasSuffix(relative, ".md") || entry.Type != "blob" || (entry.Mode != "100644" && entry.Mode != "100755") {
@@ -217,6 +218,9 @@ func (manager *Manager) load(ctx context.Context, storePath string, expectedStor
 	}
 	if manifestEntry == nil {
 		return Snapshot{}, fmt.Errorf("%w: architecture.yaml is missing", ErrInvalid)
+	}
+	if componentsTreePresent && !componentsPresent {
+		return Snapshot{}, fmt.Errorf("%w: accepted tree contains an empty components directory", ErrInvalid)
 	}
 	if componentsPresent {
 		return Snapshot{}, ErrUnsupported

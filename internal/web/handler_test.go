@@ -256,6 +256,16 @@ func TestInitializeProjectReportsInvalidAndUnsupportedAcceptedStates(t *testing.
 			},
 		},
 		{
+			name:       "empty components tree is invalid",
+			wantStatus: http.StatusConflict,
+			wantCode:   "architecture_invalid",
+			buildTree: func(t *testing.T, repository, manifestBlob string) string {
+				emptyComponentsTree := runGitWithInput(t, repository, nil, "--git-dir", repository, "mktree")
+				root := "100644 blob " + manifestBlob + "\tarchitecture.yaml\n040000 tree " + emptyComponentsTree + "\tcomponents\n"
+				return runGitWithInput(t, repository, []byte(root), "--git-dir", repository, "mktree")
+			},
+		},
+		{
 			name:       "component-bearing tree is unsupported",
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   "architecture_unsupported",
