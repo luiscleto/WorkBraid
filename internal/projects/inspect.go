@@ -20,9 +20,10 @@ var (
 )
 
 type Inspection struct {
-	SourceRoot string `json:"source_root"`
-	Known      bool   `json:"known"`
-	StoreID    string `json:"store_id,omitempty"`
+	SourceRoot  string `json:"source_root"`
+	ProjectName string `json:"project_name"`
+	Known       bool   `json:"known"`
+	StoreID     string `json:"store_id,omitempty"`
 }
 
 // Inspect validates a local source-root path and checks only the operational
@@ -52,5 +53,18 @@ func Inspect(ctx context.Context, db *sql.DB, sourceRoot string) (Inspection, er
 	if err != nil {
 		return Inspection{}, fmt.Errorf("look up Architecture association: %w", err)
 	}
-	return Inspection{SourceRoot: normalized, Known: known, StoreID: storeID}, nil
+	return Inspection{
+		SourceRoot:  normalized,
+		ProjectName: projectName(normalized),
+		Known:       known,
+		StoreID:     storeID,
+	}, nil
+}
+
+func projectName(sourceRoot string) string {
+	name := strings.TrimSpace(filepath.Base(sourceRoot))
+	if name == "" || name == string(filepath.Separator) || name == "." {
+		return "Project"
+	}
+	return name
 }

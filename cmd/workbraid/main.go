@@ -42,7 +42,7 @@ func main() {
 		log.Fatalf("initialize operational database: %v", err)
 	}
 
-	handler := web.NewHandler(db, expectedOrigin, *uiDirectory)
+	handler := web.NewHandler(db, expectedOrigin, *uiDirectory, *dataDirectory)
 	log.Printf("WorkBraid is available at %s", expectedOrigin)
 	if err := http.ListenAndServe(*listenAddress, handler); err != nil {
 		log.Fatal(err)

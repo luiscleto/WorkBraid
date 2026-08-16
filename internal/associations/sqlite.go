@@ -37,3 +37,33 @@ func Lookup(ctx context.Context, db *sql.DB, normalizedSourceRoot string) (strin
 	}
 	return storeID, true, nil
 }
+
+// GetOrCreate records proposedStoreID when the source root has no association.
+// If another caller wins the unique-key race, it returns that winning store ID.
+func GetOrCreate(ctx context.Context, db *sql.DB, normalizedSourceRoot, proposedStoreID string) (string, error) {
+	result, err := db.ExecContext(ctx,
+		`INSERT INTO source_architecture_associations(normalized_source_root, store_id)
+		 VALUES (?, ?)
+		 ON CONFLICT(normalized_source_root) DO NOTHING`,
+		normalizedSourceRoot, proposedStoreID,
+	)
+	if err != nil {
+		return "", err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return "", err
+	}
+	if rows == 1 {
+		return proposedStoreID, nil
+	}
+
+	storeID, known, err := Lookup(ctx, db, normalizedSourceRoot)
+	if err != nil {
+		return "", err
+	}
+	if !known {
+		return "", errors.New("association conflict winner could not be read")
+	}
+	return storeID, nil
+}

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -15,8 +16,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/google/uuid"
+	"go.yaml.in/yaml/v4"
 	_ "modernc.org/sqlite"
 
 	"workbraid/internal/associations"
@@ -28,7 +32,7 @@ func TestOpenProjectUsesRealSQLiteAndLeavesSourceRepositoryUntouched(t *testing.
 	db := openWebTestDatabase(t)
 	repository := createSourceRepository(t)
 	before := snapshotRepository(t, repository)
-	handler := NewHandler(db, testOrigin, t.TempDir())
+	handler := newTestHandler(t, db)
 
 	response := postOpenProject(t, handler, testOrigin, repository)
 	if response.Code != http.StatusOK {
@@ -38,14 +42,15 @@ func TestOpenProjectUsesRealSQLiteAndLeavesSourceRepositoryUntouched(t *testing.
 		t.Fatalf("permissive CORS header = %q", got)
 	}
 	var body struct {
-		SourceRoot string `json:"source_root"`
-		Known      bool   `json:"known"`
-		StoreID    string `json:"store_id"`
+		SourceRoot  string `json:"source_root"`
+		ProjectName string `json:"project_name"`
+		Known       bool   `json:"known"`
+		StoreID     string `json:"store_id"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if body.SourceRoot != filepath.Clean(repository) || body.Known || body.StoreID != "" {
+	if body.SourceRoot != filepath.Clean(repository) || body.ProjectName != filepath.Base(repository) || body.Known || body.StoreID != "" {
 		t.Fatalf("unexpected response: %+v", body)
 	}
 
@@ -62,6 +67,235 @@ func TestOpenProjectUsesRealSQLiteAndLeavesSourceRepositoryUntouched(t *testing.
 	}
 }
 
+func TestInitializeProjectCreatesOneAcceptedBootstrapAndLeavesSourceUntouched(t *testing.T) {
+	db := openWebTestDatabase(t)
+	repository := createSourceRepository(t)
+	before := snapshotRepository(t, repository)
+	dataDirectory := t.TempDir()
+	handler := NewHandler(db, testOrigin, t.TempDir(), dataDirectory)
+
+	opened := postOpenProject(t, handler, testOrigin, repository)
+	if opened.Code != http.StatusOK || !strings.Contains(opened.Body.String(), `"known":false`) {
+		t.Fatalf("open status=%d body=%s", opened.Code, opened.Body.String())
+	}
+	assertAssociationCount(t, db, 0)
+	if _, err := os.Stat(filepath.Join(dataDirectory, "architecture")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("opening created private Architecture state: %v", err)
+	}
+
+	initialized := postInitializeProject(t, handler, testOrigin, repository)
+	if initialized.Code != http.StatusOK {
+		t.Fatalf("initialize status=%d body=%s", initialized.Code, initialized.Body.String())
+	}
+	if got := initialized.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("permissive CORS header = %q", got)
+	}
+	var result struct {
+		SourceRoot     string `json:"source_root"`
+		ProjectName    string `json:"project_name"`
+		State          string `json:"state"`
+		Revision       string `json:"revision"`
+		ComponentCount int    `json:"component_count"`
+	}
+	if err := json.Unmarshal(initialized.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.SourceRoot != filepath.Clean(repository) || result.ProjectName != filepath.Base(repository) || result.State != "empty" || result.Revision == "" || result.ComponentCount != 0 {
+		t.Fatalf("unexpected initialization result: %+v", result)
+	}
+
+	storeID := associatedStoreID(t, db, filepath.Clean(repository))
+	var tables string
+	if err := db.QueryRow(`SELECT group_concat(name, ',') FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != "source_architecture_associations" {
+		t.Fatalf("operational database tables = %q", tables)
+	}
+	if _, err := uuid.Parse(storeID); err != nil {
+		t.Fatalf("associated ID is not UUID: %q", storeID)
+	}
+	storePath := filepath.Join(dataDirectory, "architecture", storeID+".git")
+	if got := runGit(t, dataDirectory, "--git-dir", storePath, "rev-parse", "--is-bare-repository"); got != "true" {
+		t.Fatalf("bare = %q", got)
+	}
+	if got := runGit(t, dataDirectory, "--git-dir", storePath, "show-ref", "--verify", "--hash", "refs/heads/accepted"); got != result.Revision {
+		t.Fatalf("accepted=%q revision=%q", got, result.Revision)
+	}
+	if got := runGit(t, dataDirectory, "--git-dir", storePath, "rev-list", "--parents", "-n", "1", result.Revision); got != result.Revision {
+		t.Fatalf("bootstrap has a parent: %q", got)
+	}
+	if got := runGit(t, dataDirectory, "--git-dir", storePath, "ls-tree", result.Revision); !strings.HasPrefix(got, "100644 blob ") || !strings.HasSuffix(got, "\tarchitecture.yaml") || strings.Contains(got, "\n") {
+		t.Fatalf("unexpected bootstrap tree: %q", got)
+	}
+	manifestBytes := []byte(runGit(t, dataDirectory, "--git-dir", storePath, "show", result.Revision+":architecture.yaml"))
+	var manifest struct {
+		Format  string `yaml:"format"`
+		Version int    `yaml:"version"`
+		StoreID string `yaml:"store_id"`
+		Project struct {
+			Name       string `yaml:"name"`
+			SourceHint string `yaml:"source_hint"`
+		} `yaml:"project"`
+	}
+	if err := yaml.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Format != "workbraid-architecture" || manifest.Version != 1 || manifest.StoreID != storeID || manifest.Project.Name != filepath.Base(repository) || manifest.Project.SourceHint != filepath.Clean(repository) {
+		t.Fatalf("unexpected manifest: %+v", manifest)
+	}
+	if after := snapshotRepository(t, repository); after != before {
+		t.Fatalf("source repository changed\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+func TestInitializeProjectRetainsAssociationAndRetriesSameStore(t *testing.T) {
+	db := openWebTestDatabase(t)
+	repository := createSourceRepository(t)
+	before := snapshotRepository(t, repository)
+	dataDirectory := t.TempDir()
+	blockingPath := filepath.Join(dataDirectory, "architecture")
+	if err := os.WriteFile(blockingPath, []byte("block"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(db, testOrigin, t.TempDir(), dataDirectory)
+
+	failed := postInitializeProject(t, handler, testOrigin, repository)
+	if failed.Code != http.StatusInternalServerError || !strings.Contains(failed.Body.String(), `"code":"setup_incomplete"`) {
+		t.Fatalf("failed status=%d body=%s", failed.Code, failed.Body.String())
+	}
+	storeID := associatedStoreID(t, db, filepath.Clean(repository))
+	assertAssociationCount(t, db, 1)
+	if err := os.Remove(blockingPath); err != nil {
+		t.Fatal(err)
+	}
+
+	retried := postInitializeProject(t, handler, testOrigin, repository)
+	if retried.Code != http.StatusOK {
+		t.Fatalf("retry status=%d body=%s", retried.Code, retried.Body.String())
+	}
+	if got := associatedStoreID(t, db, filepath.Clean(repository)); got != storeID {
+		t.Fatalf("retry replaced store ID %q with %q", storeID, got)
+	}
+	storePath := filepath.Join(dataDirectory, "architecture", storeID+".git")
+	if commits := runGit(t, dataDirectory, "--git-dir", storePath, "rev-list", "--all", "--count"); commits != "1" {
+		t.Fatalf("commit count = %s, want 1", commits)
+	}
+	if after := snapshotRepository(t, repository); after != before {
+		t.Fatalf("source repository changed\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+func TestConcurrentInitializationUsesOneAssociationAndStore(t *testing.T) {
+	db := openWebTestDatabase(t)
+	repository := createSourceRepository(t)
+	dataDirectory := t.TempDir()
+	handler := NewHandler(db, testOrigin, t.TempDir(), dataDirectory)
+
+	start := make(chan struct{})
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	var wait sync.WaitGroup
+	for range 2 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			responses <- postInitializeProject(t, handler, testOrigin, repository)
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(responses)
+	for response := range responses {
+		if response.Code != http.StatusOK {
+			t.Fatalf("initialize status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	assertAssociationCount(t, db, 1)
+	storeID := associatedStoreID(t, db, filepath.Clean(repository))
+	entries, err := os.ReadDir(filepath.Join(dataDirectory, "architecture"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != storeID+".git" {
+		t.Fatalf("private stores = %v, want only %s.git", entries, storeID)
+	}
+}
+
+func TestInitializeProjectEnforcesOriginWithoutCORS(t *testing.T) {
+	db := openWebTestDatabase(t)
+	handler := newTestHandler(t, db)
+	repository := t.TempDir()
+	for _, origin := range []string{"", "http://attacker.example"} {
+		response := postInitializeProject(t, handler, origin, repository)
+		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"origin_mismatch"`) {
+			t.Fatalf("origin %q: status=%d body=%s", origin, response.Code, response.Body.String())
+		}
+		if got := response.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Fatalf("origin %q: permissive CORS = %q", origin, got)
+		}
+	}
+	assertAssociationCount(t, db, 0)
+}
+
+func TestInitializeProjectReportsInvalidAndUnsupportedAcceptedStates(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		wantStatus int
+		wantCode   string
+		buildTree  func(t *testing.T, repository, manifestBlob string) string
+	}{
+		{
+			name:       "identity mismatch is invalid",
+			wantStatus: http.StatusConflict,
+			wantCode:   "architecture_invalid",
+			buildTree: func(t *testing.T, repository, _ string) string {
+				wrongManifest := "format: workbraid-architecture\nversion: 1\nstore_id: \"" + uuid.NewString() + "\"\nproject:\n  name: Project\n  source_hint: /tmp/project\n"
+				blob := runGitWithInput(t, repository, []byte(wrongManifest), "--git-dir", repository, "hash-object", "-w", "--stdin")
+				return runGitWithInput(t, repository, []byte("100644 blob "+blob+"\tarchitecture.yaml\n"), "--git-dir", repository, "mktree")
+			},
+		},
+		{
+			name:       "component-bearing tree is unsupported",
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   "architecture_unsupported",
+			buildTree: func(t *testing.T, repository, manifestBlob string) string {
+				component := []byte("---\nid: \"" + uuid.NewString() + "\"\nrelationships: []\n---\n# Component\n")
+				componentBlob := runGitWithInput(t, repository, component, "--git-dir", repository, "hash-object", "-w", "--stdin")
+				componentTree := runGitWithInput(t, repository, []byte("100644 blob "+componentBlob+"\tcomponent.md\n"), "--git-dir", repository, "mktree")
+				root := "100644 blob " + manifestBlob + "\tarchitecture.yaml\n040000 tree " + componentTree + "\tcomponents\n"
+				return runGitWithInput(t, repository, []byte(root), "--git-dir", repository, "mktree")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := openWebTestDatabase(t)
+			source := t.TempDir()
+			dataDirectory := t.TempDir()
+			handler := NewHandler(db, testOrigin, t.TempDir(), dataDirectory)
+			initialized := postInitializeProject(t, handler, testOrigin, source)
+			if initialized.Code != http.StatusOK {
+				t.Fatalf("initialize status=%d body=%s", initialized.Code, initialized.Body.String())
+			}
+			storeID := associatedStoreID(t, db, filepath.Clean(source))
+			repository := filepath.Join(dataDirectory, "architecture", storeID+".git")
+			oldRevision := runGit(t, dataDirectory, "--git-dir", repository, "show-ref", "--verify", "--hash", "refs/heads/accepted")
+			manifestBlob := strings.Fields(runGit(t, dataDirectory, "--git-dir", repository, "ls-tree", oldRevision, "architecture.yaml"))[2]
+			tree := test.buildTree(t, repository, manifestBlob)
+			commit := runGitWithInput(t, repository, []byte("external accepted state\n"), "-c", "user.name=Test", "-c", "user.email=test@workbraid.invalid", "--git-dir", repository, "commit-tree", tree)
+			runGit(t, dataDirectory, "--git-dir", repository, "update-ref", "refs/heads/accepted", commit, oldRevision)
+
+			response := postInitializeProject(t, handler, testOrigin, source)
+			if response.Code != test.wantStatus || !strings.Contains(response.Body.String(), `"code":"`+test.wantCode+`"`) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			if accepted := runGit(t, dataDirectory, "--git-dir", repository, "show-ref", "--verify", "--hash", "refs/heads/accepted"); accepted != commit {
+				t.Fatalf("failed load changed accepted from %q to %q", commit, accepted)
+			}
+		})
+	}
+}
+
 func TestOpenProjectReturnsPreseededAssociation(t *testing.T) {
 	db := openWebTestDatabase(t)
 	repository := t.TempDir()
@@ -73,7 +307,7 @@ func TestOpenProjectReturnsPreseededAssociation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	response := postOpenProject(t, NewHandler(db, testOrigin, t.TempDir()), testOrigin, repository)
+	response := postOpenProject(t, newTestHandler(t, db), testOrigin, repository)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
@@ -84,7 +318,7 @@ func TestOpenProjectReturnsPreseededAssociation(t *testing.T) {
 
 func TestOpenProjectReportsOperationalDatabaseFailure(t *testing.T) {
 	db := openWebTestDatabase(t)
-	handler := NewHandler(db, testOrigin, t.TempDir())
+	handler := newTestHandler(t, db)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +334,7 @@ func TestOpenProjectReportsOperationalDatabaseFailure(t *testing.T) {
 
 func TestOpenProjectRejectsUnexpectedOrMissingOriginWithoutCORS(t *testing.T) {
 	db := openWebTestDatabase(t)
-	handler := NewHandler(db, testOrigin, t.TempDir())
+	handler := newTestHandler(t, db)
 	repository := t.TempDir()
 
 	for _, origin := range []string{"", "http://attacker.example"} {
@@ -119,7 +353,7 @@ func TestOpenProjectRejectsUnexpectedOrMissingOriginWithoutCORS(t *testing.T) {
 
 func TestOpenProjectRejectsInvalidPaths(t *testing.T) {
 	db := openWebTestDatabase(t)
-	handler := NewHandler(db, testOrigin, t.TempDir())
+	handler := newTestHandler(t, db)
 	regularFile := filepath.Join(t.TempDir(), "file.txt")
 	if err := os.WriteFile(regularFile, []byte("file"), 0o600); err != nil {
 		t.Fatal(err)
@@ -150,7 +384,7 @@ func TestOpenProjectRejectsInvalidPaths(t *testing.T) {
 
 func TestOpenProjectMapsMalformedJSONToGenericFailureCode(t *testing.T) {
 	db := openWebTestDatabase(t)
-	handler := NewHandler(db, testOrigin, t.TempDir())
+	handler := newTestHandler(t, db)
 
 	for _, body := range []string{`{"source_root":`, `{"source_root":"/tmp"} {}`} {
 		request := httptest.NewRequest(http.MethodPost, "/api/projects/open", strings.NewReader(body))
@@ -176,7 +410,7 @@ func TestHandlerServesBuiltUI(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	response := httptest.NewRecorder()
-	NewHandler(db, testOrigin, uiDirectory).ServeHTTP(response, request)
+	NewHandler(db, testOrigin, uiDirectory, t.TempDir()).ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "WorkBraid") {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
@@ -198,18 +432,60 @@ func postOpenProject(t *testing.T, handler http.Handler, origin, sourceRoot stri
 	return response
 }
 
+func postInitializeProject(t *testing.T, handler http.Handler, origin, sourceRoot string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"source_root": sourceRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/projects/initialize", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	if origin != "" {
+		request.Header.Set("Origin", origin)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func associatedStoreID(t *testing.T, db *sql.DB, sourceRoot string) string {
+	t.Helper()
+	var storeID string
+	if err := db.QueryRow(`SELECT store_id FROM source_architecture_associations WHERE normalized_source_root = ?`, sourceRoot).Scan(&storeID); err != nil {
+		t.Fatal(err)
+	}
+	return storeID
+}
+
+func assertAssociationCount(t *testing.T, db *sql.DB, want int) {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM source_architecture_associations`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != want {
+		t.Fatalf("association count = %d, want %d", count, want)
+	}
+}
+
 func openWebTestDatabase(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "workbraid.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
 	if err := associations.Initialize(db); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
+}
+
+func newTestHandler(t *testing.T, db *sql.DB) http.Handler {
+	t.Helper()
+	return NewHandler(db, testOrigin, t.TempDir(), t.TempDir())
 }
 
 func createSourceRepository(t *testing.T) string {
@@ -231,6 +507,18 @@ func runGit(t *testing.T, directory string, arguments ...string) string {
 	t.Helper()
 	command := exec.CommandContext(context.Background(), "git", arguments...)
 	command.Dir = directory
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", arguments, err, output)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func runGitWithInput(t *testing.T, directory string, input []byte, arguments ...string) string {
+	t.Helper()
+	command := exec.CommandContext(context.Background(), "git", arguments...)
+	command.Dir = directory
+	command.Stdin = bytes.NewReader(input)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v\n%s", arguments, err, output)

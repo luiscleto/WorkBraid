@@ -1,7 +1,13 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
+
+const unlinkedProject = {
+  source_root: '/tmp/example',
+  project_name: 'example',
+  known: false,
+}
 
 describe('App', () => {
   afterEach(() => {
@@ -17,35 +23,144 @@ describe('App', () => {
     expect(screen.queryByRole('heading', { name: 'Not linked' })).not.toBeInTheDocument()
   })
 
-  it('reports that the folder is not linked without claiming no architecture exists', async () => {
-    const fetchMock = mockResponse({ source_root: '/tmp/example', known: false })
+  it('offers a simple derived-context confirmation only after the user chooses setup', async () => {
+    const fetchMock = mockResponses([unlinkedProject])
     render(<App />)
 
     await submitPath('  /tmp/example  ')
-
     expect(await screen.findByRole('heading', { name: 'Not linked' })).toBeInTheDocument()
     expect(screen.getByText('WorkBraid has not linked this folder to architecture.')).toBeInTheDocument()
     expect(screen.getByText('/tmp/example')).toBeInTheDocument()
     expect(screen.queryByText(/store (does not|doesn't) exist/i)).not.toBeInTheDocument()
-    expect(requestBody(fetchMock)).toEqual({ source_root: '/tmp/example' })
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Set up architecture' }))
+
+    expect(screen.getByRole('heading', { name: 'Set up architecture?' })).toBeInTheDocument()
+    expect(screen.getByText('example')).toBeInTheDocument()
+    expect(screen.getByText('/tmp/example')).toBeInTheDocument()
+    expect(screen.getAllByRole('textbox')).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.getByRole('heading', { name: 'Not linked' })).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(requestBody(fetchMock, 0)).toEqual({ source_root: '/tmp/example' })
     expect(screen.getByLabelText('Project folder')).toHaveValue('/tmp/example')
   })
 
-  it('shows a linked folder returned by SQLite in human language', async () => {
-    mockResponse({
-      source_root: '/tmp/example',
-      known: true,
-      store_id: 'a0b38e04-54bd-464d-8a8f-8f2e78e653ea',
-    })
+  it('initializes explicitly and shows the empty architecture with technical details collapsed', async () => {
+    const revision = 'a'.repeat(40)
+    const fetchMock = mockResponses([
+      unlinkedProject,
+      {
+        source_root: '/tmp/example',
+        project_name: 'example',
+        state: 'empty',
+        revision,
+        component_count: 0,
+      },
+    ])
     render(<App />)
+    await submitPath('/tmp/example')
 
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Set up architecture' }))
+    await user.click(screen.getByRole('button', { name: 'Set up' }))
+
+    expect(await screen.findByRole('heading', { name: 'Architecture ready' })).toBeInTheDocument()
+    expect(screen.getByText('This project has an empty architecture.')).toBeInTheDocument()
+    const details = screen.getByText('Technical details').closest('details')
+    expect(details).not.toHaveAttribute('open')
+    expect(within(details as HTMLElement).getByText(revision)).toBeInTheDocument()
+    expect(requestPath(fetchMock, 1)).toBe('/api/projects/initialize')
+    expect(requestBody(fetchMock, 1)).toEqual({ source_root: '/tmp/example' })
+  })
+
+  it('opens a known link without presenting a new-setup confirmation', async () => {
+    const fetchMock = mockResponses([
+      { ...unlinkedProject, known: true },
+      { source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: 'b'.repeat(40), component_count: 0 },
+    ])
+    render(<App />)
     await submitPath('/tmp/example')
 
     expect(await screen.findByRole('heading', { name: 'Linked' })).toBeInTheDocument()
     expect(screen.getByText('WorkBraid found the architecture linked to this folder.')).toBeInTheDocument()
-    expect(screen.getByText('/tmp/example')).toBeInTheDocument()
-    expect(screen.queryByText('Architecture ID')).not.toBeInTheDocument()
-    expect(screen.queryByText('a0b38e04-54bd-464d-8a8f-8f2e78e653ea')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Architecture ID/i)).not.toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Open architecture' }))
+    expect(await screen.findByRole('heading', { name: 'Architecture ready' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Set up architecture?' })).not.toBeInTheDocument()
+    expect(requestPath(fetchMock, 1)).toBe('/api/projects/initialize')
+  })
+
+  it('keeps an incomplete setup retryable in the same running application', async () => {
+    const fetchMock = mockResponses([
+      unlinkedProject,
+      { code: 'setup_incomplete' },
+      { source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: 'c'.repeat(40), component_count: 0 },
+    ], [200, 500, 200])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Set up architecture' }))
+    await user.click(screen.getByRole('button', { name: 'Set up' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Setup did not finish')
+    expect(alert).toHaveTextContent('WorkBraid could not finish setting up architecture. Try again.')
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByRole('heading', { name: 'Architecture ready' })).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('shows concise setup progress after confirmation', async () => {
+    let finishSetup: ((response: Response) => void) | undefined
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(unlinkedProject), { status: 200 }))
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => { finishSetup = resolve }))
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Set up architecture' }))
+    await user.click(screen.getByRole('button', { name: 'Set up' }))
+
+    expect(screen.getByText('Setting up architecture…')).toBeInTheDocument()
+    finishSetup?.(new Response(JSON.stringify({
+      source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: 'd'.repeat(40), component_count: 0,
+    }), { status: 200 }))
+    expect(await screen.findByRole('heading', { name: 'Architecture ready' })).toBeInTheDocument()
+  })
+
+  it('keeps implementation terminology out of normal setup copy', async () => {
+    mockResponses([unlinkedProject])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Set up architecture' }))
+
+    const sheet = screen.getByRole('article').textContent ?? ''
+    expect(sheet).not.toMatch(/\b(store|association|bootstrap|manifest|canonical|uuid|accepted ref|accepted revision)\b/i)
+  })
+
+  it.each([
+    ['architecture_invalid', 409, 'Architecture needs attention', 'files conflict with the expected format'],
+    ['architecture_unsupported', 422, 'Architecture not supported yet', 'contains components that this version of WorkBraid cannot open yet'],
+  ])('shows %s clearly without pretending an empty architecture loaded', async (code, status, heading, message) => {
+    mockResponses([unlinkedProject, { code }], [200, status])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Set up architecture' }))
+    await user.click(screen.getByRole('button', { name: 'Set up' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(heading)
+    expect(alert).toHaveTextContent(message)
+    expect(screen.queryByText('This project has an empty architecture.')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
   })
 
   it.each([
@@ -55,7 +170,7 @@ describe('App', () => {
     ['path_not_directory', 'That path is a file. Choose the project folder.'],
     ['origin_mismatch', 'Open WorkBraid at the address printed in the terminal.'],
   ])('maps backend code %s to an operator sentence', async (code, message) => {
-    mockResponse({ code }, 400)
+    mockResponses([{ code }], [400])
     render(<App />)
 
     await submitPath(code === 'path_required' ? '' : '/tmp/example')
@@ -66,7 +181,7 @@ describe('App', () => {
   })
 
   it('maps unknown response shapes and network failures to one generic sentence', async () => {
-    mockResponse({ error: 'request body must be valid JSON' }, 400)
+    mockResponses([{ error: 'request body must be valid JSON' }], [400])
     const { unmount } = render(<App />)
 
     await submitPath('/tmp/example')
@@ -82,7 +197,7 @@ describe('App', () => {
     expect(screen.queryByText('backend unavailable')).not.toBeInTheDocument()
   })
 
-  it('shows concise lookup progress', async () => {
+  it('shows concise progress for lookup and setup', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>(() => undefined))
     render(<App />)
 
@@ -93,17 +208,23 @@ describe('App', () => {
   })
 })
 
-function mockResponse(body: unknown, status = 200) {
-  return vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-    new Response(JSON.stringify(body), {
-      status,
+function mockResponses(bodies: unknown[], statuses: number[] = []) {
+  let index = 0
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+    const current = index++
+    return new Response(JSON.stringify(bodies[current]), {
+      status: statuses[current] ?? 200,
       headers: { 'Content-Type': 'application/json' },
-    }),
-  )
+    })
+  })
 }
 
-function requestBody(fetchMock: ReturnType<typeof mockResponse>) {
-  const options = fetchMock.mock.calls[0]?.[1]
+function requestPath(fetchMock: ReturnType<typeof mockResponses>, index: number) {
+  return String(fetchMock.mock.calls[index]?.[0])
+}
+
+function requestBody(fetchMock: ReturnType<typeof mockResponses>, index: number) {
+  const options = fetchMock.mock.calls[index]?.[1]
   return JSON.parse(String(options?.body)) as unknown
 }
 

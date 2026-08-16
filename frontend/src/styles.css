@@ -225,6 +225,11 @@ button:disabled {
   line-height: 1.55;
 }
 
+.project-name {
+  margin-bottom: 8px !important;
+  font-weight: 600;
+}
+
 .error .message h2,
 .error .message > p {
   color: var(--ink);
@@ -238,6 +243,62 @@ button:disabled {
   color: var(--ink);
   font-family: "IBM Plex Mono", monospace;
   font-size: 0.88rem;
+}
+
+.inline-action,
+.secondary-action {
+  min-width: auto;
+  margin-top: 24px;
+  border: 1px solid var(--accent);
+  padding: 12px 18px;
+}
+
+.secondary-action {
+  border-color: var(--hairline);
+  color: var(--ink);
+  background: transparent;
+}
+
+.secondary-action:hover:not(:disabled) {
+  background: rgb(32 33 27 / 6%);
+}
+
+.button-group {
+  display: flex;
+  gap: 10px;
+}
+
+details {
+  margin-top: 26px;
+  padding-top: 14px;
+  border-top: 1px solid var(--hairline);
+}
+
+summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--muted-ink);
+  font-size: 0.84rem;
+}
+
+dl {
+  margin: 14px 0 0;
+}
+
+dt {
+  margin-bottom: 5px;
+  color: var(--muted-ink);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.82rem;
 }
 
 @keyframes note-in {
@@ -286,5 +347,13 @@ button:disabled {
 
   button {
     width: 100%;
+  }
+
+  .button-group {
+    flex-direction: column-reverse;
+  }
+
+  .button-group button {
+    margin-top: 10px;
   }
 }
