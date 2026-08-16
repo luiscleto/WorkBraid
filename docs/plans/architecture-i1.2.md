@@ -202,6 +202,21 @@ Use the real built browser UI served by the Go process, a real compatible Git ex
 
 Record **PASS** only if both flows use production application operations and real authorities. A failure blocks I1.3 until the violated invariant is understood and corrected.
 
+## Execution result
+
+Status: Complete — human checkpoint **PASS** on 2026-08-16
+
+- Architecture planning baseline: `87060260dc8975bdcb2e89d0a3c30c978b2d103d`.
+- Integrated I1.1 implementation base: `6497a816f5cd4dde9b3e09536f47ec51a9c9612f`.
+- Approved I1.2 packet commit: `8b3d69bd59ee801abc6dc29e4eb073910bc5814b`.
+- Integrated I1.2 implementation SHA: `84db0d5170d0e24561789ce5f3571def8b779e64`.
+- Independent review: initial reviews found and reproduced an accepted empty `components` tree and YAML scalar type coercion; both were corrected with real-Git and production-HTTP regression coverage. The final fresh review reported no actionable findings.
+- Automated validation: PASS for diff checks, uncached and race-enabled Go tests, Go vet, module verification, 16 frontend tests, production frontend build, and bounded real Git/SQLite/filesystem/HTTP checks.
+- Successful-setup accepted revision: `f7f6b16c9f15d341e80954097e7d16b4a970b47e`.
+- Interrupted-setup retry accepted revision: `5aed83361df656513566f1133d832870a944878e` using the original associated store ID and location.
+- Both human-checkpoint source repositories retained their recorded `HEAD`, status, files, and content checksums.
+- I1.3 was not started.
+
 ## Stop boundary
 
 I1.2 is complete only after integration, fresh review, and the real human checkpoint pass. Stop there. Do not begin restart loading, the complete invalid-store matrix, or any I1.3 work without explicit human approval.
