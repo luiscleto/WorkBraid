@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -208,7 +210,8 @@ func TestLoadRejectsNonStringRecoveryHintsFromAcceptedGitTree(t *testing.T) {
 }
 
 func TestLoadAcceptedComponentSnapshotFromRealGit(t *testing.T) {
-	manager := NewManager(t.TempDir())
+	dataDirectory := t.TempDir()
+	manager := NewManager(dataDirectory)
 	storeID := uuid.NewString()
 	snapshot, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
 	if err != nil {
@@ -256,11 +259,13 @@ func TestLoadAcceptedComponentSnapshotFromRealGit(t *testing.T) {
 	if parsedAPI.path != "components/odd name.md" || string(parsedAPI.body) != "\nAPI body with [a link](https://example.invalid).\n" {
 		t.Fatalf("API path/body = %q / %q", parsedAPI.path, parsedAPI.body)
 	}
-	if len(parsedAPI.relationships) != 2 || parsedAPI.relationships[0].label != "calls" || parsedAPI.relationships[1].label != "observes" {
+	if len(parsedAPI.relationships) != 2 ||
+		parsedAPI.relationships[0].target != uuid.MustParse(workerID) || parsedAPI.relationships[0].label != "calls" ||
+		parsedAPI.relationships[1].target != uuid.MustParse(workerID) || parsedAPI.relationships[1].label != "observes" {
 		t.Fatalf("API relationships = %+v", parsedAPI.relationships)
 	}
 	parsedWorker := byID[uuid.MustParse(workerID)]
-	if string(parsedWorker.body) != "<div>inert source</div>\n" || len(parsedWorker.relationships) != 1 || parsedWorker.relationships[0].target != uuid.MustParse(apiID) {
+	if string(parsedWorker.body) != "<div>inert source</div>\n" || len(parsedWorker.relationships) != 1 || parsedWorker.relationships[0].target != uuid.MustParse(apiID) || parsedWorker.relationships[0].label != "responds to" {
 		t.Fatalf("worker body/relationships = %q / %+v", parsedWorker.body, parsedWorker.relationships)
 	}
 	if relationships := byID[uuid.MustParse(duplicateTitleID)].relationships; len(relationships) != 0 {
@@ -271,6 +276,21 @@ func TestLoadAcceptedComponentSnapshotFromRealGit(t *testing.T) {
 	}
 	if after := acceptedAuthorityState(t, storePath); after != before {
 		t.Fatalf("component load changed accepted repository\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	reconstructed, err := NewManager(dataDirectory).LoadAccepted(context.Background(), storeID)
+	if err != nil {
+		t.Fatalf("reconstruct component snapshot with a new Manager: %v", err)
+	}
+	if reconstructed.Revision() != commit {
+		t.Fatalf("reconstructed revision = %q, want %q", reconstructed.Revision(), commit)
+	}
+	loadedState := retainedComponentState(loaded)
+	reconstructedState := retainedComponentState(reconstructed)
+	if !reflect.DeepEqual(reconstructedState, loadedState) {
+		t.Fatalf("reconstructed retained fields differ\nloaded: %#v\nreconstructed: %#v", loadedState, reconstructedState)
+	}
+	if after := acceptedAuthorityState(t, storePath); after != before {
+		t.Fatalf("new-Manager reconstruction changed accepted repository\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 
 	renamedTree := mktree(t, storePath, strings.Join([]string{
@@ -294,6 +314,31 @@ func TestLoadAcceptedComponentSnapshotFromRealGit(t *testing.T) {
 	if renamedAPI.id != uuid.MustParse(apiID) || renamedAPI.path != "components/renamed.md" || renamedAPI.title != "Shared title" {
 		t.Fatalf("renamed component identity/path/title = %s / %q / %q", renamedAPI.id, renamedAPI.path, renamedAPI.title)
 	}
+}
+
+type retainedComponent struct {
+	path          string
+	title         string
+	body          string
+	relationships []string
+}
+
+func retainedComponentState(snapshot Snapshot) map[uuid.UUID]retainedComponent {
+	state := make(map[uuid.UUID]retainedComponent, len(snapshot.components))
+	for _, component := range snapshot.components {
+		relationships := make([]string, len(component.relationships))
+		for index, relationship := range component.relationships {
+			relationships[index] = relationship.target.String() + "\x00" + relationship.label
+		}
+		sort.Strings(relationships)
+		state[component.id] = retainedComponent{
+			path:          component.path,
+			title:         component.title,
+			body:          string(component.body),
+			relationships: relationships,
+		}
+	}
+	return state
 }
 
 func TestParseComponentPreservesExactBodyAfterCompleteHeadingBlock(t *testing.T) {
@@ -394,6 +439,12 @@ func TestLoadRejectsDuplicateIDsAndUnresolvedRelationshipsAtomically(t *testing.
 					"---\nid: \"" + id + "\"\n---\n# One\n",
 					"---\nid: \"" + id + "\"\n---\n# Two\n",
 				}
+			},
+		},
+		{
+			name: "string ID that is not a UUID",
+			components: func() []string {
+				return []string{"---\nid: \"not-a-uuid\"\nrelationships: []\n---\n# One\n"}
 			},
 		},
 		{
