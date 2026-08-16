@@ -274,13 +274,13 @@ Each pending change set:
 
 - is based on one exact accepted Git revision;
 - may eventually change multiple components, relationships, and canonical files coherently;
-- remains non-canonical until a deliberate accepted-revision commit succeeds;
+- remains non-canonical until deliberate compare-and-swap advancement of `refs/heads/accepted` succeeds;
 - is owned by the local backend while the application is running;
-- survives validation and commit failures during that running application session.
+- survives validation, commit creation, and ref-update failures that occur before the acceptance success boundary during that running application session.
 
 Transient unsent browser edits are allowed, but the browser does not own the authoritative pending change set. Persistence and recovery of pending change sets across backend restart are deferred.
 
-The canonical Git store remains unchanged until the accepted operation succeeds. Validation or commit failure preserves:
+The canonical Git store remains unchanged until successful compare-and-swap advancement of `refs/heads/accepted`. Validation, commit creation, or ref-update failure before that boundary preserves:
 
 - the previous accepted revision;
 - the pending change set for continued editing or retry during the running application session.
@@ -293,15 +293,18 @@ A human may directly update accepted Architecture without creating a proposal.
 
 The backend:
 
-1. constructs the complete candidate Architecture from the change set and exact base;
-2. performs minimal structural validation;
+1. constructs the complete candidate Architecture from the pending change set and its exact accepted base;
+2. performs minimal structural validation and constructs the immutable candidate snapshot from that validated state;
 3. generates an exact unified diff between the base and candidate Git trees;
 4. gives the user an opportunity to inspect the complete diff;
-5. on confirmation, checks that `accepted` still equals the change-set base;
+5. on confirmation, verifies that `refs/heads/accepted` still equals the pending change set's exact base;
 6. creates the successor commit;
-7. atomically advances `accepted` from the base to the successor.
+7. atomically advances `refs/heads/accepted` from the base to the successor;
+8. after successful advancement, marks the pending change set as committed/consumed and publishes the already-validated candidate snapshot under the successor commit identity.
 
 The diff includes the entire pending change set and canonical frontmatter changes. It is review evidence, not another canonical artifact. No semantic diff engine is required.
+
+Successful atomic advancement of `refs/heads/accepted` is the acceptance success boundary. Once that compare-and-swap succeeds, the successor commit is canonical even if subsequent in-memory publication or the HTTP/UI response fails. WorkBraid must not treat that change as still uncommitted or offer to commit it again. A post-CAS publication failure is recovered by loading the revision named by `accepted`; restart and reopen independently prove reconstruction from canonical state.
 
 If the atomic ref update fails:
 
@@ -309,7 +312,7 @@ If the atomic ref update fails:
 - the pending change set is stale;
 - WorkBraid does not silently overwrite newer accepted state.
 
-An unreferenced Git commit object is not canonical state.
+Commit or object creation without successful compare-and-swap advancement is not accepted state. The previous accepted revision remains authoritative and the pending change set remains uncommitted.
 
 After success, WorkBraid exposes the exact accepted commit identity and parent diff without requiring the SHA to dominate the normal UI.
 
@@ -474,7 +477,7 @@ Using the real WorkBraid application through production code paths:
 6. Create a tiny Architecture through WorkBraid.
 7. Review and deliberately commit its exact candidate diff.
 8. See the accepted map and navigate component documentation.
-9. Edit accepted Architecture through a pending change set, verify that a validation or commit failure preserves it while the application remains running, and then commit a valid accepted revision.
+9. Edit accepted Architecture through a pending change set, verify that validation, commit creation, or ref-update failure before successful compare-and-swap preserves it while the application remains running, and then commit a valid accepted revision.
 10. Verify the exact resulting commit identity and parent diff.
 11. Restart WorkBraid after the accepted commit.
 12. Reload the same accepted revision and reconstruct the same Architecture, documentation, relationships, and map. Recovery of an uncommitted pending change set across backend restart is not part of this gate.
