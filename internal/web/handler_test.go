@@ -266,6 +266,17 @@ func TestInitializeProjectReportsInvalidAndUnsupportedAcceptedStates(t *testing.
 			},
 		},
 		{
+			name:       "non-string recovery hints are invalid",
+			wantStatus: http.StatusConflict,
+			wantCode:   "architecture_invalid",
+			buildTree: func(t *testing.T, repository, _ string) string {
+				storeID := strings.TrimSuffix(filepath.Base(repository), ".git")
+				typedManifest := "format: workbraid-architecture\nversion: 1\nstore_id: \"" + storeID + "\"\nproject:\n  name: 123\n  source_hint: true\n"
+				blob := runGitWithInput(t, repository, []byte(typedManifest), "--git-dir", repository, "hash-object", "-w", "--stdin")
+				return runGitWithInput(t, repository, []byte("100644 blob "+blob+"\tarchitecture.yaml\n"), "--git-dir", repository, "mktree")
+			},
+		},
+		{
 			name:       "component-bearing tree is unsupported",
 			wantStatus: http.StatusUnprocessableEntity,
 			wantCode:   "architecture_unsupported",

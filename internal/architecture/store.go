@@ -262,22 +262,104 @@ func marshalManifest(value manifest) ([]byte, error) {
 
 func parseManifest(contents []byte) (manifest, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(contents))
-	decoder.KnownFields(true)
-	var value manifest
-	if err := decoder.Decode(&value); err != nil {
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
 		return manifest{}, fmt.Errorf("parse architecture.yaml: %w", err)
 	}
-	var extra any
+	var extra yaml.Node
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return manifest{}, errors.New("architecture.yaml contains multiple YAML documents")
 		}
 		return manifest{}, fmt.Errorf("parse architecture.yaml: %w", err)
 	}
+	if len(document.Content) != 1 {
+		return manifest{}, errors.New("architecture.yaml must contain one mapping")
+	}
+	if err := validateManifestYAML(document.Content[0]); err != nil {
+		return manifest{}, err
+	}
+	var value manifest
+	if err := document.Content[0].Decode(&value); err != nil {
+		return manifest{}, fmt.Errorf("parse architecture.yaml: %w", err)
+	}
 	if err := validateManifest(value); err != nil {
 		return manifest{}, err
 	}
 	return value, nil
+}
+
+func validateManifestYAML(root *yaml.Node) error {
+	if root.Kind != yaml.MappingNode || root.ShortTag() != "!!map" {
+		return errors.New("architecture.yaml must contain a mapping")
+	}
+	required := map[string]bool{
+		"format": false, "version": false, "store_id": false, "project": false,
+	}
+	for index := 0; index < len(root.Content); index += 2 {
+		key := root.Content[index]
+		value := root.Content[index+1]
+		if key.Kind != yaml.ScalarNode || key.ShortTag() != "!!str" {
+			return errors.New("architecture.yaml field names must be strings")
+		}
+		if _, known := required[key.Value]; !known {
+			return fmt.Errorf("architecture.yaml contains unknown field %q", key.Value)
+		}
+		if required[key.Value] {
+			return fmt.Errorf("architecture.yaml contains duplicate field %q", key.Value)
+		}
+		required[key.Value] = true
+		switch key.Value {
+		case "format", "store_id":
+			if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!str" {
+				return fmt.Errorf("architecture.yaml field %s must be a string", key.Value)
+			}
+		case "version":
+			if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!int" {
+				return errors.New("architecture.yaml field version must be an integer")
+			}
+		case "project":
+			if err := validateManifestProjectYAML(value); err != nil {
+				return err
+			}
+		}
+	}
+	for field, present := range required {
+		if !present {
+			return fmt.Errorf("architecture.yaml is missing field %q", field)
+		}
+	}
+	return nil
+}
+
+func validateManifestProjectYAML(project *yaml.Node) error {
+	if project.Kind != yaml.MappingNode || project.ShortTag() != "!!map" {
+		return errors.New("architecture.yaml field project must be a mapping")
+	}
+	required := map[string]bool{"name": false, "source_hint": false}
+	for index := 0; index < len(project.Content); index += 2 {
+		key := project.Content[index]
+		value := project.Content[index+1]
+		if key.Kind != yaml.ScalarNode || key.ShortTag() != "!!str" {
+			return errors.New("architecture.yaml project field names must be strings")
+		}
+		if _, known := required[key.Value]; !known {
+			return fmt.Errorf("architecture.yaml project contains unknown field %q", key.Value)
+		}
+		if required[key.Value] {
+			return fmt.Errorf("architecture.yaml project contains duplicate field %q", key.Value)
+		}
+		required[key.Value] = true
+		if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!str" {
+			return fmt.Errorf("architecture.yaml field project.%s must be a string", key.Value)
+		}
+	}
+	for field, present := range required {
+		if !present {
+			return fmt.Errorf("architecture.yaml project is missing field %q", field)
+		}
+	}
+	return nil
 }
 
 func validateManifest(value manifest) error {

@@ -144,6 +144,27 @@ func TestLoadRejectsIdentityMismatchWithoutChangingAccepted(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsNonStringRecoveryHintsFromAcceptedGitTree(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	storeID := uuid.NewString()
+	snapshot, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath, _ := manager.StorePath(storeID)
+	typedManifest := []byte("format: workbraid-architecture\nversion: 1\nstore_id: \"" + storeID + "\"\nproject:\n  name: 123\n  source_hint: true\n")
+	commit := commitManifestTree(t, storePath, typedManifest, "100644", nil)
+	gitText(t, "--git-dir", storePath, "update-ref", acceptedRef, commit, snapshot.Revision())
+
+	loaded, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("typed recovery hints load = (%+v, %v), want invalid", loaded, err)
+	}
+	if accepted := gitText(t, "--git-dir", storePath, "show-ref", "--verify", "--hash", acceptedRef); accepted != commit {
+		t.Fatalf("failed load changed accepted from %q to %q", commit, accepted)
+	}
+}
+
 func TestLoadReportsComponentBearingV1TreeAsUnsupported(t *testing.T) {
 	manager := NewManager(t.TempDir())
 	storeID := uuid.NewString()
@@ -285,14 +306,21 @@ func TestManifestSchemaIsClosed(t *testing.T) {
 	storeID := uuid.NewString()
 	base := "format: workbraid-architecture\nversion: 1\nstore_id: \"" + storeID + "\"\nproject:\n  name: Project\n  source_hint: /tmp/project\n"
 	for name, contents := range map[string]string{
-		"top-level unknown":   base + "extra: true\n",
-		"project unknown":     strings.Replace(base, "  source_hint: /tmp/project\n", "  source_hint: /tmp/project\n  extra: true\n", 1),
-		"unsupported version": strings.Replace(base, "version: 1", "version: 2", 1),
-		"empty name":          strings.Replace(base, "name: Project", "name: '   '", 1),
-		"multiple documents":  base + "---\nformat: workbraid-architecture\n",
-		"wrong format type":   strings.Replace(base, "format: workbraid-architecture", "format: [workbraid-architecture]", 1),
-		"wrong version type":  strings.Replace(base, "version: 1", "version: one", 1),
-		"wrong project type":  strings.Replace(base, "project:\n  name: Project\n  source_hint: /tmp/project", "project: Project", 1),
+		"top-level unknown":       base + "extra: true\n",
+		"duplicate top field":     base + "format: workbraid-architecture\n",
+		"project unknown":         strings.Replace(base, "  source_hint: /tmp/project\n", "  source_hint: /tmp/project\n  extra: true\n", 1),
+		"duplicate project field": strings.Replace(base, "  source_hint: /tmp/project\n", "  source_hint: /tmp/project\n  name: Again\n", 1),
+		"unsupported version":     strings.Replace(base, "version: 1", "version: 2", 1),
+		"empty name":              strings.Replace(base, "name: Project", "name: '   '", 1),
+		"multiple documents":      base + "---\nformat: workbraid-architecture\n",
+		"wrong format type":       strings.Replace(base, "format: workbraid-architecture", "format: [workbraid-architecture]", 1),
+		"boolean format":          strings.Replace(base, "format: workbraid-architecture", "format: true", 1),
+		"wrong version type":      strings.Replace(base, "version: 1", "version: one", 1),
+		"quoted version":          strings.Replace(base, "version: 1", "version: \"1\"", 1),
+		"numeric store ID":        strings.Replace(base, "store_id: \""+storeID+"\"", "store_id: 123", 1),
+		"wrong project type":      strings.Replace(base, "project:\n  name: Project\n  source_hint: /tmp/project", "project: Project", 1),
+		"numeric project name":    strings.Replace(base, "name: Project", "name: 123", 1),
+		"boolean source hint":     strings.Replace(base, "source_hint: /tmp/project", "source_hint: true", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseManifest([]byte(contents)); err == nil {
