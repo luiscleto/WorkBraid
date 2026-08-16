@@ -203,6 +203,20 @@ After each, inspect the fixture with read-only SQLite/filesystem/Git commands an
 
 Record **PASS** only if process B reconstructs the exact original revision and both representative failures remain logically read-only and truthful through production application paths. A failure blocks Increment 2 until the violated invariant is understood and corrected.
 
+## Execution result
+
+Status: Complete — human checkpoint **PASS** on 2026-08-16
+
+- Approved I1.3 planning baseline and worker base: `e554e2247f2be5939501cc57da06809086c4f63b`.
+- Integrated I1.2 implementation provenance: `84db0d5170d0e24561789ce5f3571def8b779e64`.
+- Integrated I1.3 implementation SHA: `186611b3d4c1d8c35484efb9d8285f95d6eef987`.
+- Independent review: PASS with no actionable findings.
+- Automated validation: PASS for diff checks, uncached and race-enabled Go tests, Go vet, module verification, 19 frontend tests, production frontend build, the real-process restart smoke, and the five bounded real-Git/SQLite/filesystem/HTTP failure cases.
+- Human restart validation: PASS. A completely stopped and newly started WorkBraid process reconstructed exact accepted revision `9869adc903bb7a990e85d200c74c01709cc28697` from the same application-data directory.
+- Human representative-failure validation: PASS. Missing `refs/heads/accepted` remained unavailable despite a plausible fallback ref, and an otherwise-valid component-bearing revision was reported as unsupported rather than malformed or empty.
+- The successful and failure-fixture source repositories retained their recorded `HEAD`, status, tracked and untracked files, and content checksums. Associations and private Git refs remained logically unchanged during reopen and failure handling.
+- Increment 2 was not started.
+
 ## Stop boundary
 
 I1.3 completes Architecture Increment 1 only after integration, fresh review, and the real human checkpoint pass. Stop there. Do not begin component loading, Increment 2 planning/implementation, or any later Gate 1 work without explicit human approval.
