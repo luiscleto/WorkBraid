@@ -93,6 +93,30 @@ describe('App', () => {
     expect(requestPath(fetchMock, 0)).toBe('/api/projects/open')
   })
 
+  it('shows a compact read-only component title inventory', async () => {
+    const revision = 'e'.repeat(40)
+    mockResponses([{
+      source_root: '/tmp/example',
+      project_name: 'example',
+      state: 'ready',
+      revision,
+      component_count: 3,
+      component_titles: ['API', 'Worker', 'API'],
+    }])
+    render(<App />)
+    await submitPath('/tmp/example')
+
+    expect(await screen.findByRole('heading', { name: 'Architecture ready' })).toBeInTheDocument()
+    expect(screen.getByText('This architecture has 3 components.')).toBeInTheDocument()
+    expect(screen.getAllByRole('listitem').map((item) => item.textContent)).toEqual(['API', 'Worker', 'API'])
+    expect(screen.queryByText('This project has an empty architecture.')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /create|edit|relationship|map|repair/i })).not.toBeInTheDocument()
+    expect(screen.queryByText(/markdown|frontmatter|uuid|filename|relationship/i)).not.toBeInTheDocument()
+    const details = screen.getByText('Technical details').closest('details')
+    expect(details).not.toHaveAttribute('open')
+    expect(within(details as HTMLElement).getByText(revision)).toBeInTheDocument()
+  })
+
   it.each([
     ['architecture_unavailable', 409, 'Architecture unavailable', 'could not open the architecture linked to this project'],
     ['architecture_invalid', 409, 'Architecture needs attention', "could not read this project's architecture"],
@@ -162,7 +186,7 @@ describe('App', () => {
 
   it.each([
     ['architecture_invalid', 409, 'Architecture needs attention', "could not read this project's architecture"],
-    ['architecture_unsupported', 422, 'Architecture not supported yet', 'contains components that this version of WorkBraid cannot open yet'],
+    ['architecture_unsupported', 422, 'Architecture not supported yet', 'uses features that this version of WorkBraid cannot open yet'],
   ])('shows %s clearly without pretending an empty architecture loaded', async (code, status, heading, message) => {
     mockResponses([unlinkedProject, { code }], [200, status])
     render(<App />)

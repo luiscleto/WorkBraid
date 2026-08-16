@@ -105,21 +105,31 @@ func (h *Handler) openProject(response http.ResponseWriter, request *http.Reques
 	}
 	h.publishSnapshot(snapshot)
 
-	writeJSON(response, http.StatusOK, architectureResponse{
-		SourceRoot:     inspection.SourceRoot,
-		ProjectName:    inspection.ProjectName,
-		State:          "empty",
-		Revision:       snapshot.Revision(),
-		ComponentCount: snapshot.ComponentCount(),
-	})
+	writeJSON(response, http.StatusOK, responseForSnapshot(inspection.SourceRoot, inspection.ProjectName, snapshot))
 }
 
 type architectureResponse struct {
-	SourceRoot     string `json:"source_root"`
-	ProjectName    string `json:"project_name"`
-	State          string `json:"state"`
-	Revision       string `json:"revision"`
-	ComponentCount int    `json:"component_count"`
+	SourceRoot      string   `json:"source_root"`
+	ProjectName     string   `json:"project_name"`
+	State           string   `json:"state"`
+	Revision        string   `json:"revision"`
+	ComponentCount  int      `json:"component_count"`
+	ComponentTitles []string `json:"component_titles"`
+}
+
+func responseForSnapshot(sourceRoot, projectName string, snapshot architecture.Snapshot) architectureResponse {
+	state := "ready"
+	if snapshot.ComponentCount() == 0 {
+		state = "empty"
+	}
+	return architectureResponse{
+		SourceRoot:      sourceRoot,
+		ProjectName:     projectName,
+		State:           state,
+		Revision:        snapshot.Revision(),
+		ComponentCount:  snapshot.ComponentCount(),
+		ComponentTitles: snapshot.ComponentTitles(),
+	}
 }
 
 func (h *Handler) initializeProject(response http.ResponseWriter, request *http.Request) {
@@ -179,13 +189,7 @@ func (h *Handler) initializeProject(response http.ResponseWriter, request *http.
 	}
 
 	h.publishSnapshot(snapshot)
-	writeJSON(response, http.StatusOK, architectureResponse{
-		SourceRoot:     inspection.SourceRoot,
-		ProjectName:    inspection.ProjectName,
-		State:          "empty",
-		Revision:       snapshot.Revision(),
-		ComponentCount: snapshot.ComponentCount(),
-	})
+	writeJSON(response, http.StatusOK, responseForSnapshot(inspection.SourceRoot, inspection.ProjectName, snapshot))
 }
 
 func (h *Handler) publishSnapshot(snapshot architecture.Snapshot) {

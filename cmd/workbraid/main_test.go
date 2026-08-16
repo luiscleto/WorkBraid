@@ -54,7 +54,7 @@ func TestOriginForLoopbackAddress(t *testing.T) {
 	}
 }
 
-func TestRealProcessRestartReopensExactAcceptedArchitecture(t *testing.T) {
+func TestRealProcessRestartReopensExactAcceptedComponents(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and restarts the real WorkBraid process")
 	}
@@ -102,6 +102,8 @@ func TestRealProcessRestartReopensExactAcceptedArchitecture(t *testing.T) {
 	if accepted := processTestGit(t, source, "--git-dir", storePath, "show-ref", "--verify", "--hash", "refs/heads/accepted"); accepted != first.Revision {
 		t.Fatalf("accepted=%q initialized=%q", accepted, first.Revision)
 	}
+	acceptedComponents := processTestAdvanceAcceptedComponents(t, storePath, first.Revision)
+	t.Logf("accepted component fixture revision: %s", acceptedComponents)
 
 	processB := startWorkBraidProcess(t, binary, dataDirectory, uiDirectory)
 	reopened := postProcessJSON(t, processB.origin, "/api/projects/open", source)
@@ -109,17 +111,21 @@ func TestRealProcessRestartReopensExactAcceptedArchitecture(t *testing.T) {
 		t.Fatalf("reopen status=%d body=%s", reopened.status, reopened.body)
 	}
 	var second struct {
-		Revision       string `json:"revision"`
-		State          string `json:"state"`
-		ComponentCount int    `json:"component_count"`
+		Revision        string   `json:"revision"`
+		State           string   `json:"state"`
+		ComponentCount  int      `json:"component_count"`
+		ComponentTitles []string `json:"component_titles"`
 	}
 	if err := json.Unmarshal([]byte(reopened.body), &second); err != nil {
 		t.Fatal(err)
 	}
-	if second.Revision != first.Revision || second.State != "empty" || second.ComponentCount != 0 {
-		t.Fatalf("restarted Architecture=%+v original=%+v", second, first)
+	if second.Revision != acceptedComponents || second.State != "ready" || second.ComponentCount != 2 || strings.Join(second.ComponentTitles, "|") != "API|Worker" {
+		t.Fatalf("restarted component Architecture=%+v accepted=%q", second, acceptedComponents)
 	}
 	processB.stop(t)
+	if accepted := processTestGit(t, source, "--git-dir", storePath, "show-ref", "--verify", "--hash", "refs/heads/accepted"); accepted != acceptedComponents {
+		t.Fatalf("component load changed accepted from %q to %q", acceptedComponents, accepted)
+	}
 	if storeIDAfter := processTestStoreID(t, filepath.Join(dataDirectory, "workbraid.db"), filepath.Clean(source)); storeIDAfter != storeID {
 		t.Fatalf("restart changed architecture link from %q to %q", storeID, storeIDAfter)
 	}
@@ -127,6 +133,29 @@ func TestRealProcessRestartReopensExactAcceptedArchitecture(t *testing.T) {
 	if sourceAfter := snapshotProcessTestSource(t, source); sourceAfter != sourceBefore {
 		t.Fatalf("source repository changed across process restart\nbefore:\n%s\nafter:\n%s", sourceBefore, sourceAfter)
 	}
+}
+
+func processTestAdvanceAcceptedComponents(t *testing.T, storePath, parent string) string {
+	t.Helper()
+	manifest := []byte(processTestGit(t, storePath, "--git-dir", storePath, "show", parent+":architecture.yaml") + "\n")
+	const apiID = "11111111-1111-4111-8111-111111111111"
+	const workerID = "22222222-2222-4222-8222-222222222222"
+	api := []byte("---\nid: \"" + apiID + "\"\nrelationships:\n  - target: \"" + workerID + "\"\n    label: calls\n---\n# API\n\nAPI body\n")
+	worker := []byte("---\nid: \"" + workerID + "\"\nrelationships: []\n---\nWorker\n======\nWorker body\n")
+	manifestBlob := processTestGitInput(t, storePath, manifest, "--git-dir", storePath, "hash-object", "-w", "--stdin")
+	apiBlob := processTestGitInput(t, storePath, api, "--git-dir", storePath, "hash-object", "-w", "--stdin")
+	workerBlob := processTestGitInput(t, storePath, worker, "--git-dir", storePath, "hash-object", "-w", "--stdin")
+	componentTree := processTestGitInput(t, storePath, []byte(
+		"100644 blob "+apiBlob+"\tapi.md\n100755 blob "+workerBlob+"\tworker.md\n",
+	), "--git-dir", storePath, "mktree")
+	rootTree := processTestGitInput(t, storePath, []byte(
+		"100644 blob "+manifestBlob+"\tarchitecture.yaml\n040000 tree "+componentTree+"\tcomponents\n",
+	), "--git-dir", storePath, "mktree")
+	commit := processTestGitInput(t, storePath, []byte("Add accepted components\n"),
+		"-c", "user.name=WorkBraid Test", "-c", "user.email=test@workbraid.invalid",
+		"--git-dir", storePath, "commit-tree", rootTree, "-p", parent)
+	processTestGit(t, storePath, "--git-dir", storePath, "update-ref", "refs/heads/accepted", commit, parent)
+	return commit
 }
 
 type workBraidProcess struct {
@@ -297,6 +326,18 @@ func processTestGit(t *testing.T, directory string, arguments ...string) string 
 	t.Helper()
 	command := exec.Command("git", arguments...)
 	command.Dir = directory
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", arguments, err, output)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func processTestGitInput(t *testing.T, directory string, input []byte, arguments ...string) string {
+	t.Helper()
+	command := exec.Command("git", arguments...)
+	command.Dir = directory
+	command.Stdin = bytes.NewReader(input)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v\n%s", arguments, err, output)

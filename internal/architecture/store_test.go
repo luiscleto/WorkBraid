@@ -3,6 +3,7 @@ package architecture
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,7 +207,7 @@ func TestLoadRejectsNonStringRecoveryHintsFromAcceptedGitTree(t *testing.T) {
 	}
 }
 
-func TestLoadReportsComponentBearingV1TreeAsUnsupported(t *testing.T) {
+func TestLoadAcceptedComponentSnapshotFromRealGit(t *testing.T) {
 	manager := NewManager(t.TempDir())
 	storeID := uuid.NewString()
 	snapshot, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
@@ -215,15 +216,220 @@ func TestLoadReportsComponentBearingV1TreeAsUnsupported(t *testing.T) {
 	}
 	storePath, _ := manager.StorePath(storeID)
 	manifestBytes := gitBytes(t, "--git-dir", storePath, "show", snapshot.Revision()+":architecture.yaml")
-	component := []byte("---\nid: \"" + uuid.NewString() + "\"\nrelationships: []\n---\n# API\n")
-	componentBlob := writeTestBlob(t, storePath, component)
-	componentTree := mktree(t, storePath, "100644 blob "+componentBlob+"\tapi.md\n")
+	apiID := uuid.NewString()
+	workerID := uuid.NewString()
+	duplicateTitleID := uuid.NewString()
+	omittedID := uuid.NewString()
+	api := []byte("---\nid: \"" + apiID + "\"\nrelationships:\n  - target: \"" + workerID + "\"\n    label: \"calls\"\n  - target: \"" + workerID + "\"\n    label: \"observes\"\n---\n\n# Shared title\n\nAPI body with [a link](https://example.invalid).\n")
+	worker := []byte("---\nid: \"" + workerID + "\"\nrelationships:\n  - target: \"" + apiID + "\"\n    label: \"responds to\"\n---\nWorker\n======\n<div>inert source</div>\n")
+	duplicateTitle := []byte("---\nid: \"" + duplicateTitleID + "\"\nrelationships: []\n---\n# Shared title\n```mermaid\ngraph TD\n```\n")
+	omitted := []byte("---\nid: \"" + omittedID + "\"\n---\n# Other\n[Markdown link](https://example.invalid/other)\n")
+	apiBlob := writeTestBlob(t, storePath, api)
+	workerBlob := writeTestBlob(t, storePath, worker)
+	duplicateBlob := writeTestBlob(t, storePath, duplicateTitle)
+	omittedBlob := writeTestBlob(t, storePath, omitted)
+	componentTree := mktree(t, storePath, strings.Join([]string{
+		"100644 blob " + duplicateBlob + "\tanything.md",
+		"100644 blob " + apiBlob + "\todd name.md",
+		"100644 blob " + omittedBlob + "\tomitted.md",
+		"100755 blob " + workerBlob + "\tworker.md",
+	}, "\n")+"\n")
 	commit := commitManifestTree(t, storePath, manifestBytes, "100644", []string{"040000 tree " + componentTree + "\tcomponents"})
 	gitText(t, "--git-dir", storePath, "update-ref", acceptedRef, commit, snapshot.Revision())
+	before := acceptedAuthorityState(t, storePath)
 
-	_, err = manager.LoadAccepted(context.Background(), storeID)
-	if !errors.Is(err, ErrUnsupported) || errors.Is(err, ErrInvalid) {
-		t.Fatalf("component-bearing tree error = %v, want unsupported and not invalid", err)
+	loaded, err := manager.LoadAccepted(context.Background(), storeID)
+	if err != nil {
+		t.Fatalf("load component-bearing tree: %v", err)
+	}
+	if loaded.Revision() != commit || loaded.ComponentCount() != 4 {
+		t.Fatalf("loaded snapshot revision=%q components=%d", loaded.Revision(), loaded.ComponentCount())
+	}
+	if got := loaded.ComponentTitles(); strings.Join(got, "|") != "Shared title|Shared title|Other|Worker" {
+		t.Fatalf("component titles = %q", got)
+	}
+	byID := make(map[uuid.UUID]component)
+	for _, component := range loaded.components {
+		byID[component.id] = component
+	}
+	parsedAPI := byID[uuid.MustParse(apiID)]
+	if parsedAPI.path != "components/odd name.md" || string(parsedAPI.body) != "\nAPI body with [a link](https://example.invalid).\n" {
+		t.Fatalf("API path/body = %q / %q", parsedAPI.path, parsedAPI.body)
+	}
+	if len(parsedAPI.relationships) != 2 || parsedAPI.relationships[0].label != "calls" || parsedAPI.relationships[1].label != "observes" {
+		t.Fatalf("API relationships = %+v", parsedAPI.relationships)
+	}
+	parsedWorker := byID[uuid.MustParse(workerID)]
+	if string(parsedWorker.body) != "<div>inert source</div>\n" || len(parsedWorker.relationships) != 1 || parsedWorker.relationships[0].target != uuid.MustParse(apiID) {
+		t.Fatalf("worker body/relationships = %q / %+v", parsedWorker.body, parsedWorker.relationships)
+	}
+	if relationships := byID[uuid.MustParse(duplicateTitleID)].relationships; len(relationships) != 0 {
+		t.Fatalf("empty relationship sequence parsed as %+v", relationships)
+	}
+	if relationships := byID[uuid.MustParse(omittedID)].relationships; len(relationships) != 0 {
+		t.Fatalf("Markdown link or omitted relationships parsed as %+v", relationships)
+	}
+	if after := acceptedAuthorityState(t, storePath); after != before {
+		t.Fatalf("component load changed accepted repository\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+
+	renamedTree := mktree(t, storePath, strings.Join([]string{
+		"100644 blob " + duplicateBlob + "\tanything.md",
+		"100644 blob " + omittedBlob + "\tomitted.md",
+		"100644 blob " + apiBlob + "\trenamed.md",
+		"100755 blob " + workerBlob + "\tworker.md",
+	}, "\n")+"\n")
+	renamedCommit := commitManifestTree(t, storePath, manifestBytes, "100644", []string{"040000 tree " + renamedTree + "\tcomponents"})
+	gitText(t, "--git-dir", storePath, "update-ref", acceptedRef, renamedCommit, commit)
+	renamed, err := manager.LoadAccepted(context.Background(), storeID)
+	if err != nil {
+		t.Fatalf("load renamed component: %v", err)
+	}
+	var renamedAPI component
+	for _, component := range renamed.components {
+		if component.id == uuid.MustParse(apiID) {
+			renamedAPI = component
+		}
+	}
+	if renamedAPI.id != uuid.MustParse(apiID) || renamedAPI.path != "components/renamed.md" || renamedAPI.title != "Shared title" {
+		t.Fatalf("renamed component identity/path/title = %s / %q / %q", renamedAPI.id, renamedAPI.path, renamedAPI.title)
+	}
+}
+
+func TestParseComponentPreservesExactBodyAfterCompleteHeadingBlock(t *testing.T) {
+	id := uuid.NewString()
+	for _, test := range []struct {
+		name   string
+		source string
+		title  string
+		body   string
+	}{
+		{
+			name:   "ATX with optional whitespace",
+			source: "---\r\nid: \"" + id + "\"\r\nrelationships: []\r\n---\r\n \r\n# API #\r\n\r\nBody  \r\n",
+			title:  "API",
+			body:   "\r\nBody  \r\n",
+		},
+		{
+			name:   "Setext",
+			source: "---\nid: \"" + id + "\"\n---\nComponent *title*\n=================\n\n- exact body\n",
+			title:  "Component title",
+			body:   "\n- exact body\n",
+		},
+		{
+			name:   "Setext text beginning with hash",
+			source: "---\nid: \"" + id + "\"\n---\n#not an ATX heading\n===================\nBody\n",
+			title:  "#not an ATX heading",
+			body:   "Body\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			component, err := parseComponent("components/value.md", []byte(test.source))
+			if err != nil {
+				t.Fatalf("parse component: %v", err)
+			}
+			if component.title != test.title || string(component.body) != test.body {
+				t.Fatalf("title/body = %q / %q, want %q / %q", component.title, component.body, test.title, test.body)
+			}
+		})
+	}
+}
+
+func TestComponentFrontmatterSchemaIsClosedAndTyped(t *testing.T) {
+	id := uuid.NewString()
+	target := uuid.NewString()
+	valid := "---\nid: \"" + id + "\"\nrelationships:\n  - target: \"" + target + "\"\n    label: calls\n---\n# Component\n"
+	for name, source := range map[string][]byte{
+		"non-mapping frontmatter":     []byte("---\n- id\n---\n# Component\n"),
+		"malformed frontmatter":       []byte("---\nid: [\n---\n# Component\n"),
+		"missing closing delimiter":   []byte("---\nid: \"" + id + "\"\n# Component\n"),
+		"unknown component field":     []byte(strings.Replace(valid, "relationships:", "unknown: true\nrelationships:", 1)),
+		"duplicate component field":   []byte(strings.Replace(valid, "relationships:", "id: \""+id+"\"\nrelationships:", 1)),
+		"wrong id type":               []byte(strings.Replace(valid, "id: \""+id+"\"", "id: 123", 1)),
+		"wrong relationships type":    []byte(strings.Replace(valid, "relationships:\n  - target:", "relationships: value\nignored:\n  - target:", 1)),
+		"non-mapping relationship":    []byte(strings.Replace(valid, "  - target: \""+target+"\"\n    label: calls", "  - calls", 1)),
+		"unknown relationship field":  []byte(strings.Replace(valid, "    label: calls", "    label: calls\n    extra: true", 1)),
+		"duplicate relationship key":  []byte(strings.Replace(valid, "    label: calls", "    label: calls\n    label: again", 1)),
+		"wrong relationship type":     []byte(strings.Replace(valid, "label: calls", "label: [calls]", 1)),
+		"empty relationship label":    []byte(strings.Replace(valid, "label: calls", "label: '   '", 1)),
+		"invalid relationship target": []byte(strings.Replace(valid, target, "not-a-uuid", 1)),
+		"invalid UTF-8":               append([]byte(valid), 0xff),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseComponent("components/value.md", source); err == nil {
+				t.Fatal("component unexpectedly parsed")
+			}
+		})
+	}
+}
+
+func TestComponentRequiresFirstNonEmptyH1Block(t *testing.T) {
+	id := uuid.NewString()
+	prefix := "---\nid: \"" + id + "\"\n---\n"
+	for name, markdown := range map[string]string{
+		"missing":      "Body only\n",
+		"not first":    "Body first\n\n# Later\n",
+		"level two":    "## Component\n",
+		"empty ATX":    "#   \n",
+		"empty Setext": "   \n===\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseComponent("components/value.md", []byte(prefix+markdown)); err == nil {
+				t.Fatal("component unexpectedly parsed")
+			}
+		})
+	}
+}
+
+func TestLoadRejectsDuplicateIDsAndUnresolvedRelationshipsAtomically(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		components func() []string
+	}{
+		{
+			name: "duplicate IDs",
+			components: func() []string {
+				id := uuid.NewString()
+				return []string{
+					"---\nid: \"" + id + "\"\n---\n# One\n",
+					"---\nid: \"" + id + "\"\n---\n# Two\n",
+				}
+			},
+		},
+		{
+			name: "unresolved relationship",
+			components: func() []string {
+				return []string{"---\nid: \"" + uuid.NewString() + "\"\nrelationships:\n  - target: \"" + uuid.NewString() + "\"\n    label: calls\n---\n# One\n"}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager := NewManager(t.TempDir())
+			storeID := uuid.NewString()
+			base, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
+			if err != nil {
+				t.Fatal(err)
+			}
+			storePath, _ := manager.StorePath(storeID)
+			manifest := gitBytes(t, "--git-dir", storePath, "show", base.Revision()+":architecture.yaml")
+			var componentEntries []string
+			for index, source := range test.components() {
+				blob := writeTestBlob(t, storePath, []byte(source))
+				componentEntries = append(componentEntries, fmt.Sprintf("100644 blob %s\tcomponent-%d.md", blob, index))
+			}
+			componentTree := mktree(t, storePath, strings.Join(componentEntries, "\n")+"\n")
+			invalidCommit := commitManifestTree(t, storePath, manifest, "100644", []string{"040000 tree " + componentTree + "\tcomponents"})
+			gitText(t, "--git-dir", storePath, "update-ref", acceptedRef, invalidCommit, base.Revision())
+			before := acceptedAuthorityState(t, storePath)
+
+			loaded, err := manager.LoadAccepted(context.Background(), storeID)
+			if !errors.Is(err, ErrInvalid) || loaded.Revision() != "" || loaded.ComponentCount() != 0 {
+				t.Fatalf("failed load = (%+v, %v), want no snapshot and invalid", loaded, err)
+			}
+			if after := acceptedAuthorityState(t, storePath); after != before {
+				t.Fatalf("failed load changed accepted repository\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
 	}
 }
 
@@ -279,6 +485,30 @@ func TestLoadRejectsNonOrdinaryManifestPath(t *testing.T) {
 				t.Fatalf("failed load changed accepted from %q to %q", commit, accepted)
 			}
 		})
+	}
+}
+
+func TestLoadRejectsNonOrdinaryComponentPath(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	storeID := uuid.NewString()
+	base, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath, _ := manager.StorePath(storeID)
+	manifest := gitBytes(t, "--git-dir", storePath, "show", base.Revision()+":architecture.yaml")
+	symlinkBlob := writeTestBlob(t, storePath, []byte("elsewhere.md"))
+	componentTree := mktree(t, storePath, "120000 blob "+symlinkBlob+"\tcomponent.md\n")
+	commit := commitManifestTree(t, storePath, manifest, "100644", []string{"040000 tree " + componentTree + "\tcomponents"})
+	gitText(t, "--git-dir", storePath, "update-ref", acceptedRef, commit, base.Revision())
+	before := acceptedAuthorityState(t, storePath)
+
+	loaded, err := manager.LoadAccepted(context.Background(), storeID)
+	if !errors.Is(err, ErrInvalid) || loaded.Revision() != "" {
+		t.Fatalf("non-ordinary component load = (%+v, %v), want invalid", loaded, err)
+	}
+	if after := acceptedAuthorityState(t, storePath); after != before {
+		t.Fatalf("failed component load changed accepted repository\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
 

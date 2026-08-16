@@ -9,9 +9,10 @@ type Inspection = {
 type ArchitectureResult = {
   source_root: string
   project_name: string
-  state: 'empty'
+  state: 'empty' | 'ready'
   revision: string
   component_count: number
+  component_titles: string[]
 }
 
 type ErrorCode =
@@ -167,7 +168,21 @@ export function App() {
             {state.kind === 'ready' && (
               <div className="message">
                 <h2>Architecture ready</h2>
-                <p>This project has an empty architecture.</p>
+                {state.value.component_count === 0 ? (
+                  <p>This project has an empty architecture.</p>
+                ) : (
+                  <div className="component-inventory">
+                    <p>
+                      This architecture has {state.value.component_count}{' '}
+                      {state.value.component_count === 1 ? 'component' : 'components'}.
+                    </p>
+                    <ul>
+                      {state.value.component_titles.map((title, index) => (
+                        <li key={`${index}-${title}`}>{title}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 <FolderPath path={state.value.source_root} />
                 <details>
                   <summary>Technical details</summary>
@@ -241,7 +256,7 @@ function SetupError({
     return (
       <div className="message" role="alert">
         <h2>Architecture not supported yet</h2>
-        <p>This architecture contains components that this version of WorkBraid cannot open yet.</p>
+        <p>This architecture uses features that this version of WorkBraid cannot open yet.</p>
         <FolderPath path={state.inspection.source_root} />
       </div>
     )

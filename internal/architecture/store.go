@@ -9,8 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/text"
 	"go.yaml.in/yaml/v4"
 )
 
@@ -23,19 +28,38 @@ var (
 	ErrIncomplete  = errors.New("Architecture setup is incomplete")
 	ErrUnavailable = errors.New("Architecture is unavailable")
 	ErrInvalid     = errors.New("Architecture store is invalid")
-	ErrUnsupported = errors.New("Architecture components are not supported yet")
+	ErrUnsupported = errors.New("Architecture is unsupported")
 )
 
 // Snapshot is immutable accepted Architecture state pinned to one Git commit.
-// I1.2 loads only the valid zero-component form.
 type Snapshot struct {
-	storeID        uuid.UUID
-	revision       string
-	componentCount int
+	storeID    uuid.UUID
+	revision   string
+	components []component
+}
+
+type component struct {
+	id            uuid.UUID
+	path          string
+	title         string
+	body          []byte
+	relationships []componentRelationship
+}
+
+type componentRelationship struct {
+	target uuid.UUID
+	label  string
 }
 
 func (snapshot Snapshot) Revision() string    { return snapshot.revision }
-func (snapshot Snapshot) ComponentCount() int { return snapshot.componentCount }
+func (snapshot Snapshot) ComponentCount() int { return len(snapshot.components) }
+func (snapshot Snapshot) ComponentTitles() []string {
+	titles := make([]string, len(snapshot.components))
+	for index := range snapshot.components {
+		titles[index] = snapshot.components[index].title
+	}
+	return titles
+}
 
 type Manager struct {
 	storeRoot string
@@ -232,7 +256,7 @@ func (manager *Manager) load(ctx context.Context, storePath string, expectedStor
 
 	var manifestEntry *treeEntry
 	componentsTreePresent := false
-	componentsPresent := false
+	var componentEntries []treeEntry
 	for index := range entries {
 		entry := entries[index]
 		switch {
@@ -248,7 +272,7 @@ func (manager *Manager) load(ctx context.Context, storePath string, expectedStor
 			if strings.Contains(relative, "/") || !strings.HasSuffix(relative, ".md") || entry.Type != "blob" || (entry.Mode != "100644" && entry.Mode != "100755") {
 				return Snapshot{}, fmt.Errorf("%w: accepted tree contains an invalid component path", ErrInvalid)
 			}
-			componentsPresent = true
+			componentEntries = append(componentEntries, entry)
 		default:
 			return Snapshot{}, fmt.Errorf("%w: accepted tree contains unsupported path %q", ErrInvalid, entry.Path)
 		}
@@ -256,7 +280,7 @@ func (manager *Manager) load(ctx context.Context, storePath string, expectedStor
 	if manifestEntry == nil {
 		return Snapshot{}, fmt.Errorf("%w: architecture.yaml is missing", ErrInvalid)
 	}
-	if componentsTreePresent && !componentsPresent {
+	if componentsTreePresent && len(componentEntries) == 0 {
 		return Snapshot{}, fmt.Errorf("%w: accepted tree contains an empty components directory", ErrInvalid)
 	}
 	contents, err := manager.git.readBlob(ctx, storePath, manifestEntry.Object)
@@ -271,10 +295,287 @@ func (manager *Manager) load(ctx context.Context, storePath string, expectedStor
 	if err != nil || manifestStoreID != expectedStoreID {
 		return Snapshot{}, fmt.Errorf("%w: Architecture identity does not match this project", ErrInvalid)
 	}
-	if componentsPresent {
-		return Snapshot{}, ErrUnsupported
+	components := make([]component, 0, len(componentEntries))
+	componentIDs := make(map[uuid.UUID]struct{}, len(componentEntries))
+	for _, entry := range componentEntries {
+		contents, err := manager.git.readBlob(ctx, storePath, entry.Object)
+		if err != nil {
+			return Snapshot{}, fmt.Errorf("%w: read component %q: %v", ErrInvalid, entry.Path, err)
+		}
+		component, err := parseComponent(entry.Path, contents)
+		if err != nil {
+			return Snapshot{}, fmt.Errorf("%w: component %q: %v", ErrInvalid, entry.Path, err)
+		}
+		if _, duplicate := componentIDs[component.id]; duplicate {
+			return Snapshot{}, fmt.Errorf("%w: duplicate component ID %s", ErrInvalid, component.id)
+		}
+		componentIDs[component.id] = struct{}{}
+		components = append(components, component)
 	}
-	return Snapshot{storeID: expectedStoreID, revision: revision, componentCount: 0}, nil
+	for _, component := range components {
+		for _, relationship := range component.relationships {
+			if _, exists := componentIDs[relationship.target]; !exists {
+				return Snapshot{}, fmt.Errorf("%w: component %q has a relationship to an unknown component", ErrInvalid, component.path)
+			}
+		}
+	}
+	return Snapshot{storeID: expectedStoreID, revision: revision, components: components}, nil
+}
+
+type componentFrontmatter struct {
+	ID            string                      `yaml:"id"`
+	Relationships []componentRelationshipYAML `yaml:"relationships"`
+}
+
+type componentRelationshipYAML struct {
+	Target string `yaml:"target"`
+	Label  string `yaml:"label"`
+}
+
+var componentMarkdown = goldmark.New(
+	goldmark.WithExtensions(
+		extension.Table,
+		extension.TaskList,
+		extension.Strikethrough,
+		extension.Linkify,
+	),
+)
+
+func parseComponent(path string, contents []byte) (component, error) {
+	if !utf8.Valid(contents) {
+		return component{}, errors.New("source is not valid UTF-8")
+	}
+	frontmatter, markdownSource, err := splitComponentFrontmatter(contents)
+	if err != nil {
+		return component{}, err
+	}
+	metadata, err := parseComponentFrontmatter(frontmatter)
+	if err != nil {
+		return component{}, err
+	}
+	componentID, err := uuid.Parse(metadata.ID)
+	if err != nil {
+		return component{}, errors.New("id is not a valid UUID")
+	}
+
+	document := componentMarkdown.Parser().Parse(text.NewReader(markdownSource))
+	first := document.FirstChild()
+	heading, ok := first.(*ast.Heading)
+	if !ok || heading.Level != 1 {
+		return component{}, errors.New("first Markdown block must be a level-one heading")
+	}
+	title := strings.TrimSpace(string(heading.Text(markdownSource)))
+	if title == "" {
+		return component{}, errors.New("level-one heading title is empty")
+	}
+	bodyStart, err := headingBlockEnd(markdownSource, heading)
+	if err != nil {
+		return component{}, err
+	}
+
+	relationships := make([]componentRelationship, len(metadata.Relationships))
+	for index, relationship := range metadata.Relationships {
+		target, err := uuid.Parse(relationship.Target)
+		if err != nil {
+			return component{}, fmt.Errorf("relationship %d target is not a valid UUID", index+1)
+		}
+		relationships[index] = componentRelationship{target: target, label: relationship.Label}
+	}
+	body := append([]byte(nil), markdownSource[bodyStart:]...)
+	return component{id: componentID, path: path, title: title, body: body, relationships: relationships}, nil
+}
+
+func splitComponentFrontmatter(contents []byte) ([]byte, []byte, error) {
+	firstLine, next, ok := sourceLine(contents, 0)
+	if !ok || string(firstLine) != "---" {
+		return nil, nil, errors.New("required YAML frontmatter is missing")
+	}
+	frontmatterStart := next
+	for offset := next; offset <= len(contents); {
+		lineStart := offset
+		line, following, exists := sourceLine(contents, offset)
+		if !exists {
+			break
+		}
+		if string(line) == "---" {
+			return contents[frontmatterStart:lineStart], contents[following:], nil
+		}
+		if following <= offset {
+			break
+		}
+		offset = following
+	}
+	return nil, nil, errors.New("YAML frontmatter closing delimiter is missing")
+}
+
+func sourceLine(source []byte, offset int) ([]byte, int, bool) {
+	if offset < 0 || offset > len(source) || offset == len(source) {
+		return nil, offset, false
+	}
+	end := bytes.IndexByte(source[offset:], '\n')
+	if end < 0 {
+		line := source[offset:]
+		return bytes.TrimSuffix(line, []byte{'\r'}), len(source), true
+	}
+	line := source[offset : offset+end]
+	return bytes.TrimSuffix(line, []byte{'\r'}), offset + end + 1, true
+}
+
+func parseComponentFrontmatter(contents []byte) (componentFrontmatter, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(contents))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		return componentFrontmatter{}, fmt.Errorf("parse frontmatter: %w", err)
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return componentFrontmatter{}, errors.New("frontmatter contains multiple YAML documents")
+		}
+		return componentFrontmatter{}, fmt.Errorf("parse frontmatter: %w", err)
+	}
+	if len(document.Content) != 1 {
+		return componentFrontmatter{}, errors.New("frontmatter must contain one mapping")
+	}
+	if err := validateComponentFrontmatterYAML(document.Content[0]); err != nil {
+		return componentFrontmatter{}, err
+	}
+	var value componentFrontmatter
+	if err := document.Content[0].Decode(&value); err != nil {
+		return componentFrontmatter{}, fmt.Errorf("parse frontmatter: %w", err)
+	}
+	return value, nil
+}
+
+func validateComponentFrontmatterYAML(root *yaml.Node) error {
+	if root.Kind != yaml.MappingNode || root.ShortTag() != "!!map" {
+		return errors.New("frontmatter must contain a mapping")
+	}
+	required := map[string]bool{"id": false}
+	seenRelationships := false
+	for index := 0; index < len(root.Content); index += 2 {
+		key := root.Content[index]
+		value := root.Content[index+1]
+		if key.Kind != yaml.ScalarNode || key.ShortTag() != "!!str" {
+			return errors.New("frontmatter field names must be strings")
+		}
+		switch key.Value {
+		case "id":
+			if required["id"] {
+				return errors.New("frontmatter contains duplicate field \"id\"")
+			}
+			required["id"] = true
+			if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!str" {
+				return errors.New("frontmatter field id must be a string")
+			}
+		case "relationships":
+			if seenRelationships {
+				return errors.New("frontmatter contains duplicate field \"relationships\"")
+			}
+			seenRelationships = true
+			if value.Kind != yaml.SequenceNode || value.ShortTag() != "!!seq" {
+				return errors.New("frontmatter field relationships must be a sequence")
+			}
+			for relationshipIndex, relationship := range value.Content {
+				if err := validateRelationshipYAML(relationship); err != nil {
+					return fmt.Errorf("relationship %d: %w", relationshipIndex+1, err)
+				}
+			}
+		default:
+			return fmt.Errorf("frontmatter contains unknown field %q", key.Value)
+		}
+	}
+	if !required["id"] {
+		return errors.New("frontmatter is missing field \"id\"")
+	}
+	return nil
+}
+
+func validateRelationshipYAML(root *yaml.Node) error {
+	if root.Kind != yaml.MappingNode || root.ShortTag() != "!!map" {
+		return errors.New("item must be a mapping")
+	}
+	required := map[string]bool{"target": false, "label": false}
+	for index := 0; index < len(root.Content); index += 2 {
+		key := root.Content[index]
+		value := root.Content[index+1]
+		if key.Kind != yaml.ScalarNode || key.ShortTag() != "!!str" {
+			return errors.New("field names must be strings")
+		}
+		if _, known := required[key.Value]; !known {
+			return fmt.Errorf("contains unknown field %q", key.Value)
+		}
+		if required[key.Value] {
+			return fmt.Errorf("contains duplicate field %q", key.Value)
+		}
+		required[key.Value] = true
+		if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!str" {
+			return fmt.Errorf("field %s must be a string", key.Value)
+		}
+	}
+	for field, present := range required {
+		if !present {
+			return fmt.Errorf("is missing field %q", field)
+		}
+	}
+	label := relationshipField(root, "label")
+	if strings.TrimSpace(label) == "" {
+		return errors.New("label is empty")
+	}
+	return nil
+}
+
+func relationshipField(root *yaml.Node, name string) string {
+	for index := 0; index < len(root.Content); index += 2 {
+		if root.Content[index].Value == name {
+			return root.Content[index+1].Value
+		}
+	}
+	return ""
+}
+
+func headingBlockEnd(source []byte, heading *ast.Heading) (int, error) {
+	lines := heading.Lines()
+	if lines == nil || lines.Len() == 0 {
+		return 0, errors.New("level-one heading has no source location")
+	}
+	first := lines.At(0)
+	lineStart := bytes.LastIndexByte(source[:first.Start], '\n') + 1
+	lineEnd := endOfSourceLine(source, first.Stop)
+	line := bytes.TrimLeft(source[lineStart:lineEnd], " \t")
+	if (len(line) == 1 && line[0] == '#') || (len(line) > 1 && line[0] == '#' && (line[1] == ' ' || line[1] == '\t' || line[1] == '\r' || line[1] == '\n')) {
+		return lineEnd, nil
+	}
+	last := lines.At(lines.Len() - 1)
+	contentEnd := endOfSourceLine(source, last.Stop)
+	underlineEnd := endOfLineStartingAt(source, contentEnd)
+	if underlineEnd == contentEnd {
+		return 0, errors.New("Setext level-one heading is incomplete")
+	}
+	return underlineEnd, nil
+}
+
+func endOfSourceLine(source []byte, offset int) int {
+	if offset > len(source) {
+		return len(source)
+	}
+	if offset > 0 && source[offset-1] == '\n' {
+		return offset
+	}
+	if newline := bytes.IndexByte(source[offset:], '\n'); newline >= 0 {
+		return offset + newline + 1
+	}
+	return len(source)
+}
+
+func endOfLineStartingAt(source []byte, offset int) int {
+	if offset >= len(source) {
+		return len(source)
+	}
+	if newline := bytes.IndexByte(source[offset:], '\n'); newline >= 0 {
+		return offset + newline + 1
+	}
+	return len(source)
 }
 
 type manifest struct {

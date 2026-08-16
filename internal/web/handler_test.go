@@ -213,6 +213,96 @@ func TestNewApplicationInstanceReopensExactAcceptedEmptyArchitecture(t *testing.
 	}
 }
 
+func TestNewApplicationInstanceReopensExactAcceptedComponents(t *testing.T) {
+	repository := createSourceRepository(t)
+	sourceBefore := snapshotRepository(t, repository)
+	dataDirectory := t.TempDir()
+	databasePath := filepath.Join(dataDirectory, "workbraid.db")
+	dbA := openWebDatabaseAt(t, databasePath)
+	handlerA := NewHandler(dbA, testOrigin, t.TempDir(), dataDirectory)
+
+	initialized := postInitializeProject(t, handlerA, testOrigin, repository)
+	if initialized.Code != http.StatusOK {
+		t.Fatalf("initialize status=%d body=%s", initialized.Code, initialized.Body.String())
+	}
+	var initial struct {
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(initialized.Body.Bytes(), &initial); err != nil {
+		t.Fatal(err)
+	}
+	storeID := associatedStoreID(t, dbA, filepath.Clean(repository))
+	storePath := filepath.Join(dataDirectory, "architecture", storeID+".git")
+	manifest := []byte(runGit(t, dataDirectory, "--git-dir", storePath, "show", initial.Revision+":architecture.yaml") + "\n")
+	apiID := uuid.NewString()
+	workerID := uuid.NewString()
+	accepted := advanceAcceptedToComponents(t, storePath, initial.Revision, manifest, []testComponent{
+		{
+			path:   "arbitrary api.md",
+			mode:   "100644",
+			source: []byte("---\nid: \"" + apiID + "\"\nrelationships:\n  - target: \"" + workerID + "\"\n    label: calls\n---\n# API\n\nAPI body\n"),
+		},
+		{
+			path:   "worker.md",
+			mode:   "100755",
+			source: []byte("---\nid: \"" + workerID + "\"\nrelationships:\n  - target: \"" + apiID + "\"\n    label: responds to\n---\nWorker\n======\nWorker body\n"),
+		},
+	})
+
+	privateBefore := snapshotPrivateArchitecture(t, dataDirectory)
+	associationsBefore := snapshotAssociations(t, dbA)
+	openedA := postOpenProject(t, handlerA, testOrigin, repository)
+	assertComponentInventoryResponse(t, openedA, accepted, []string{"API", "Worker"})
+	if strings.Contains(openedA.Body.String(), apiID) || strings.Contains(openedA.Body.String(), workerID) || strings.Contains(openedA.Body.String(), "arbitrary api.md") {
+		t.Fatalf("component inventory exposed canonical details: %s", openedA.Body.String())
+	}
+	if after := snapshotPrivateArchitecture(t, dataDirectory); after != privateBefore {
+		t.Fatalf("component open changed private Architecture\nbefore:\n%s\nafter:\n%s", privateBefore, after)
+	}
+	if after := snapshotAssociations(t, dbA); after != associationsBefore {
+		t.Fatalf("component open changed associations\nbefore:\n%s\nafter:\n%s", associationsBefore, after)
+	}
+	if err := dbA.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dbB := openWebDatabaseAt(t, databasePath)
+	handlerB := NewHandler(dbB, testOrigin, t.TempDir(), dataDirectory)
+	reopened := postOpenProject(t, handlerB, testOrigin, repository)
+	assertComponentInventoryResponse(t, reopened, accepted, []string{"API", "Worker"})
+	if after := snapshotPrivateArchitecture(t, dataDirectory); after != privateBefore {
+		t.Fatalf("component reopen changed private Architecture\nbefore:\n%s\nafter:\n%s", privateBefore, after)
+	}
+	if after := snapshotAssociations(t, dbB); after != associationsBefore {
+		t.Fatalf("component reopen changed associations\nbefore:\n%s\nafter:\n%s", associationsBefore, after)
+	}
+	if sourceAfter := snapshotRepository(t, repository); sourceAfter != sourceBefore {
+		t.Fatalf("component reopen changed source repository\nbefore:\n%s\nafter:\n%s", sourceBefore, sourceAfter)
+	}
+}
+
+func assertComponentInventoryResponse(t *testing.T, response *httptest.ResponseRecorder, revision string, titles []string) {
+	t.Helper()
+	if response.Code != http.StatusOK {
+		t.Fatalf("open status=%d body=%s", response.Code, response.Body.String())
+	}
+	var loaded struct {
+		State           string   `json:"state"`
+		Revision        string   `json:"revision"`
+		ComponentCount  int      `json:"component_count"`
+		ComponentTitles []string `json:"component_titles"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &loaded); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.State != "ready" || loaded.Revision != revision || loaded.ComponentCount != len(titles) || strings.Join(loaded.ComponentTitles, "|") != strings.Join(titles, "|") {
+		t.Fatalf("component inventory response = %+v", loaded)
+	}
+	if strings.Contains(response.Body.String(), "API body") || strings.Contains(response.Body.String(), "Worker body") {
+		t.Fatalf("component response leaked canonical source: %s", response.Body.String())
+	}
+}
+
 func TestOpenProjectBoundedAcceptedStateFailuresAreReadOnly(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -260,12 +350,12 @@ func TestOpenProjectBoundedAcceptedStateFailuresAreReadOnly(t *testing.T) {
 			},
 		},
 		{
-			name:       "component-bearing v1 is unsupported",
-			wantStatus: http.StatusUnprocessableEntity,
-			wantCode:   errorArchitectureUnsupported,
+			name:       "component with unresolved relationship is invalid",
+			wantStatus: http.StatusConflict,
+			wantCode:   errorArchitectureInvalid,
 			arrange: func(t *testing.T, dataDirectory, storePath, _ string, revision string) {
 				manifest := []byte(runGit(t, dataDirectory, "--git-dir", storePath, "show", revision+":architecture.yaml") + "\n")
-				component := []byte("---\nid: \"" + uuid.NewString() + "\"\nrelationships: []\n---\n# Component\n")
+				component := []byte("---\nid: \"" + uuid.NewString() + "\"\nrelationships:\n  - target: \"" + uuid.NewString() + "\"\n    label: calls\n---\n# Component\n")
 				advanceAcceptedToManifest(t, storePath, revision, manifest, component)
 			},
 		},
@@ -304,7 +394,7 @@ func TestOpenProjectBoundedAcceptedStateFailuresAreReadOnly(t *testing.T) {
 			if response.Code != test.wantStatus || !strings.Contains(response.Body.String(), `"code":"`+test.wantCode+`"`) {
 				t.Fatalf("open status=%d body=%s", response.Code, response.Body.String())
 			}
-			if strings.Contains(response.Body.String(), `"state":"empty"`) || strings.Contains(response.Body.String(), `"revision":`) {
+			if strings.Contains(response.Body.String(), `"state":`) || strings.Contains(response.Body.String(), `"revision":`) || strings.Contains(response.Body.String(), `"component_titles":`) {
 				t.Fatalf("failed open presented accepted Architecture: %s", response.Body.String())
 			}
 			if got := response.Header().Get("Access-Control-Allow-Origin"); got != "" {
@@ -451,11 +541,11 @@ func TestInitializeProjectReportsInvalidAndUnsupportedAcceptedStates(t *testing.
 			},
 		},
 		{
-			name:       "component-bearing tree is unsupported",
-			wantStatus: http.StatusUnprocessableEntity,
-			wantCode:   "architecture_unsupported",
+			name:       "invalid component is rejected",
+			wantStatus: http.StatusConflict,
+			wantCode:   "architecture_invalid",
 			buildTree: func(t *testing.T, repository, manifestBlob string) string {
-				component := []byte("---\nid: \"" + uuid.NewString() + "\"\nrelationships: []\n---\n# Component\n")
+				component := []byte("---\nid: \"" + uuid.NewString() + "\"\nrelationships:\n  - target: \"" + uuid.NewString() + "\"\n    label: calls\n---\n# Component\n")
 				componentBlob := runGitWithInput(t, repository, component, "--git-dir", repository, "hash-object", "-w", "--stdin")
 				componentTree := runGitWithInput(t, repository, []byte("100644 blob "+componentBlob+"\tcomponent.md\n"), "--git-dir", repository, "mktree")
 				root := "100644 blob " + manifestBlob + "\tarchitecture.yaml\n040000 tree " + componentTree + "\tcomponents\n"
@@ -743,6 +833,30 @@ func advanceAcceptedToManifest(t *testing.T, storePath, oldRevision string, mani
 	}
 	tree := runGitWithInput(t, storePath, []byte(rootEntries), "--git-dir", storePath, "mktree")
 	commit := runGitWithInput(t, storePath, []byte("external accepted state\n"),
+		"-c", "user.name=Test", "-c", "user.email=test@workbraid.invalid",
+		"--git-dir", storePath, "commit-tree", tree, "-p", oldRevision)
+	runGit(t, storePath, "--git-dir", storePath, "update-ref", "refs/heads/accepted", commit, oldRevision)
+	return commit
+}
+
+type testComponent struct {
+	path   string
+	mode   string
+	source []byte
+}
+
+func advanceAcceptedToComponents(t *testing.T, storePath, oldRevision string, manifest []byte, components []testComponent) string {
+	t.Helper()
+	manifestBlob := runGitWithInput(t, storePath, manifest, "--git-dir", storePath, "hash-object", "-w", "--stdin")
+	componentEntries := make([]string, len(components))
+	for index, component := range components {
+		blob := runGitWithInput(t, storePath, component.source, "--git-dir", storePath, "hash-object", "-w", "--stdin")
+		componentEntries[index] = component.mode + " blob " + blob + "\t" + component.path
+	}
+	componentTree := runGitWithInput(t, storePath, []byte(strings.Join(componentEntries, "\n")+"\n"), "--git-dir", storePath, "mktree")
+	rootEntries := "100644 blob " + manifestBlob + "\tarchitecture.yaml\n040000 tree " + componentTree + "\tcomponents\n"
+	tree := runGitWithInput(t, storePath, []byte(rootEntries), "--git-dir", storePath, "mktree")
+	commit := runGitWithInput(t, storePath, []byte("external accepted components\n"),
 		"-c", "user.name=Test", "-c", "user.email=test@workbraid.invalid",
 		"--git-dir", storePath, "commit-tree", tree, "-p", oldRevision)
 	runGit(t, storePath, "--git-dir", storePath, "update-ref", "refs/heads/accepted", commit, oldRevision)

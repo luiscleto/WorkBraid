@@ -225,6 +225,28 @@ button:disabled {
   line-height: 1.55;
 }
 
+.component-inventory {
+  max-width: 56ch;
+  margin-bottom: 24px;
+}
+
+.component-inventory > p {
+  margin-bottom: 12px;
+  line-height: 1.55;
+}
+
+.component-inventory ul {
+  margin: 0;
+  border-top: 1px solid var(--hairline);
+  padding: 0;
+  list-style: none;
+}
+
+.component-inventory li {
+  border-bottom: 1px solid var(--hairline);
+  padding: 9px 0;
+}
+
 .project-name {
   margin-bottom: 8px !important;
   font-weight: 600;
