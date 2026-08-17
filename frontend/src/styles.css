@@ -356,6 +356,59 @@ button:disabled {
 	font-weight: 600;
 }
 
+.review-action {
+	margin-top: 20px;
+}
+
+.review-error {
+	margin: 18px 0 0;
+	border-left: 3px solid #7b3d2d;
+	padding: 8px 0 8px 14px;
+	font-weight: 600;
+	line-height: 1.5;
+}
+
+.change-review {
+	margin-top: 28px;
+	border-top: 1px solid var(--ink);
+	padding-top: 24px;
+}
+
+.change-review h3,
+.accepted-diff h3 {
+	margin: 0 0 8px;
+	font-family: "Newsreader Variable", serif;
+	font-size: 1.55rem;
+	font-weight: 520;
+}
+
+.change-review > p {
+	margin: 0 0 14px;
+	color: var(--muted-ink);
+}
+
+.change-review pre,
+.accepted-diff pre {
+	max-height: 360px;
+	margin: 0;
+	border: 1px solid var(--hairline);
+	padding: 16px;
+	overflow: auto;
+	background: rgb(255 252 232 / 45%);
+	font-family: "IBM Plex Mono", monospace;
+	font-size: 0.78rem;
+	line-height: 1.55;
+	white-space: pre;
+}
+
+.change-review details {
+	margin-top: 14px;
+}
+
+.accepted-diff {
+	margin-top: 20px;
+}
+
 .project-name {
   margin-bottom: 8px !important;
   font-weight: 600;

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -19,7 +21,11 @@ import (
 	"workbraid/internal/projects"
 )
 
-const maxRequestBody = 64 << 10
+const (
+	maxRequestBody                 = 64 << 10
+	architectureTransitionTimeout  = 30 * time.Second
+	architectureObservationTimeout = 10 * time.Second
+)
 
 type Handler struct {
 	db             *sql.DB
@@ -30,7 +36,13 @@ type Handler struct {
 	stateMutex     sync.Mutex
 	loadedSnapshot *architecture.Snapshot
 	loadedProject  *loadedProject
+	loadedStale    bool
+	acceptedDiff   string
 	pending        *pendingChangeSet
+
+	// publicationFailure is a focused test seam at the concrete post-CAS
+	// publication boundary. Production never sets it.
+	publicationFailure func() error
 }
 
 type loadedProject struct {
@@ -43,8 +55,19 @@ type pendingChangeSet struct {
 	baseRevision   string
 	changes        []architecture.ComponentChange
 	candidate      *architecture.Candidate
+	generation     uint64
+	review         *reviewBinding
+	reviewBlocker  string
 	validationCode string
 	validationItem string
+}
+
+type reviewBinding struct {
+	baseRevision  string
+	candidateTree string
+	generation    uint64
+	diff          string
+	candidate     architecture.Candidate
 }
 
 func NewHandler(db *sql.DB, expectedOrigin, uiDirectory, dataDirectory string) http.Handler {
@@ -64,6 +87,8 @@ func newHandler(db *sql.DB, expectedOrigin, uiDirectory, dataDirectory string) (
 	mux.HandleFunc("POST /api/projects/initialize", handler.initializeProject)
 	mux.HandleFunc("POST /api/architecture/components/add", handler.addComponent)
 	mux.HandleFunc("POST /api/architecture/components/edit", handler.editComponent)
+	mux.HandleFunc("POST /api/architecture/review", handler.reviewChanges)
+	mux.HandleFunc("POST /api/architecture/accept", handler.acceptChanges)
 	mux.Handle("/", handler.staticFiles())
 	return handler, mux
 }
@@ -91,6 +116,12 @@ const (
 	errorChangesElsewhere        = "changes_elsewhere"
 	errorComponentNotFound       = "component_not_found"
 	errorChangeFailed            = "change_failed"
+	errorReviewFailed            = "review_failed"
+	errorReviewChanged           = "review_changed"
+	errorArchitectureStale       = "architecture_stale"
+	errorUpdateFailed            = "update_failed"
+	errorUpdateUncertain         = "update_uncertain"
+	errorUpdatedReload           = "updated_reload"
 )
 
 func (h *Handler) openProject(response http.ResponseWriter, request *http.Request) {
@@ -144,6 +175,9 @@ type architectureResponse struct {
 	ComponentTitles []string            `json:"component_titles"`
 	Components      []componentResponse `json:"components"`
 	Changes         *changesResponse    `json:"changes,omitempty"`
+	Stale           bool                `json:"stale,omitempty"`
+	ParentDiff      string              `json:"parent_diff,omitempty"`
+	ActionError     string              `json:"action_error,omitempty"`
 }
 
 type componentResponse struct {
@@ -164,9 +198,18 @@ type changesResponse struct {
 	Valid          bool                       `json:"valid"`
 	ValidationCode string                     `json:"validation_code,omitempty"`
 	ValidationItem string                     `json:"validation_item,omitempty"`
+	Review         *reviewResponse            `json:"review,omitempty"`
+	ReviewBlocker  string                     `json:"review_blocker,omitempty"`
 }
 
-func responseForSnapshot(sourceRoot, projectName string, snapshot architecture.Snapshot, pending *pendingChangeSet) architectureResponse {
+type reviewResponse struct {
+	Diff          string `json:"diff"`
+	BaseRevision  string `json:"base_revision"`
+	CandidateTree string `json:"candidate_tree"`
+	Generation    uint64 `json:"generation"`
+}
+
+func responseForSnapshot(sourceRoot, projectName string, snapshot architecture.Snapshot, pending *pendingChangeSet, stale bool, parentDiff string) architectureResponse {
 	state := "ready"
 	if snapshot.ComponentCount() == 0 {
 		state = "empty"
@@ -184,6 +227,8 @@ func responseForSnapshot(sourceRoot, projectName string, snapshot architecture.S
 		ComponentCount:  snapshot.ComponentCount(),
 		ComponentTitles: snapshot.ComponentTitles(),
 		Components:      components,
+		Stale:           stale,
+		ParentDiff:      parentDiff,
 	}
 	if pending != nil && pending.storeID == snapshot.StoreID() && pending.baseRevision == snapshot.Revision() {
 		changes := make([]pendingComponentResponse, len(pending.changes))
@@ -195,6 +240,13 @@ func responseForSnapshot(sourceRoot, projectName string, snapshot architecture.S
 			Valid:          pending.candidate != nil,
 			ValidationCode: pending.validationCode,
 			ValidationItem: pending.validationItem,
+			ReviewBlocker:  pending.reviewBlocker,
+		}
+		if pending.review != nil && pending.review.generation == pending.generation && pending.candidate != nil && pending.review.candidateTree == pending.candidate.Tree() {
+			result.Changes.Review = &reviewResponse{
+				Diff: pending.review.diff, BaseRevision: pending.review.baseRevision,
+				CandidateTree: pending.review.candidateTree, Generation: pending.review.generation,
+			}
 		}
 	}
 	return result
@@ -262,8 +314,13 @@ func (h *Handler) initializeProject(response http.ResponseWriter, request *http.
 
 func (h *Handler) publishSnapshot(sourceRoot, projectName string, snapshot architecture.Snapshot) {
 	h.stateMutex.Lock()
+	keepAcceptedDiff := h.loadedSnapshot != nil && h.loadedSnapshot.StoreID() == snapshot.StoreID() && h.loadedSnapshot.Revision() == snapshot.Revision()
 	h.loadedSnapshot = &snapshot
 	h.loadedProject = &loadedProject{sourceRoot: sourceRoot, projectName: projectName}
+	h.loadedStale = false
+	if !keepAcceptedDiff {
+		h.acceptedDiff = ""
+	}
 	h.stateMutex.Unlock()
 }
 
@@ -273,7 +330,7 @@ func (h *Handler) currentArchitectureResponse() architectureResponse {
 	if h.loadedSnapshot == nil || h.loadedProject == nil {
 		return architectureResponse{}
 	}
-	return responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, *h.loadedSnapshot, h.pending)
+	return responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, *h.loadedSnapshot, h.pending, h.loadedStale, h.acceptedDiff)
 }
 
 type componentMutationRequest struct {
@@ -333,6 +390,10 @@ func (h *Handler) mutateComponent(response http.ResponseWriter, request *http.Re
 		writeJSON(response, http.StatusConflict, errorResponse{Code: errorArchitectureNotOpen})
 		return
 	}
+	if h.loadedStale {
+		writeJSON(response, http.StatusConflict, errorResponse{Code: errorArchitectureStale})
+		return
+	}
 	snapshot := *h.loadedSnapshot
 	if h.pending != nil && (h.pending.storeID != snapshot.StoreID() || h.pending.baseRevision != snapshot.Revision()) {
 		writeJSON(response, http.StatusConflict, errorResponse{Code: errorChangesElsewhere})
@@ -376,6 +437,8 @@ func (h *Handler) mutateComponent(response http.ResponseWriter, request *http.Re
 	} else {
 		h.pending.changes = append(h.pending.changes, change)
 	}
+	h.pending.generation++
+	h.pending.reviewBlocker = ""
 
 	candidate, err := h.architecture.ConstructCandidate(request.Context(), snapshot, h.pending.changes)
 	h.pending.candidate = nil
@@ -403,7 +466,213 @@ func (h *Handler) mutateComponent(response http.ResponseWriter, request *http.Re
 	} else {
 		h.pending.candidate = &candidate
 	}
-	writeJSON(response, http.StatusOK, responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, h.pending))
+	writeJSON(response, http.StatusOK, responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, h.pending, h.loadedStale, h.acceptedDiff))
+}
+
+func (h *Handler) reviewChanges(response http.ResponseWriter, request *http.Request) {
+	payload, ok := h.decodeArchitectureAction(response, request)
+	if !ok {
+		return
+	}
+	h.stateMutex.Lock()
+	defer h.stateMutex.Unlock()
+	if h.loadedSnapshot == nil || h.loadedProject == nil || payload.SourceRoot != h.loadedProject.sourceRoot {
+		writeJSON(response, http.StatusConflict, errorResponse{Code: errorArchitectureNotOpen})
+		return
+	}
+	if h.loadedStale {
+		writeJSON(response, http.StatusConflict, errorResponse{Code: errorArchitectureStale})
+		return
+	}
+	snapshot := *h.loadedSnapshot
+	if h.pending == nil || h.pending.storeID != snapshot.StoreID() || h.pending.baseRevision != snapshot.Revision() {
+		writeJSON(response, http.StatusConflict, errorResponse{Code: errorReviewFailed})
+		return
+	}
+
+	candidate, err := h.architecture.ConstructCandidate(request.Context(), snapshot, h.pending.changes)
+	h.pending.review = nil
+	h.pending.reviewBlocker = ""
+	if err != nil {
+		h.recordCandidateValidation(h.pending, err)
+		status := http.StatusUnprocessableEntity
+		if h.pending.validationCode == "change_unavailable" {
+			status = http.StatusInternalServerError
+		} else {
+			h.pending.reviewBlocker = h.pending.validationCode
+		}
+		result := responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, h.pending, false, h.acceptedDiff)
+		result.ActionError = errorReviewFailed
+		writeJSON(response, status, result)
+		return
+	}
+	diff, err := h.architecture.CandidateDiff(request.Context(), snapshot, candidate)
+	if err != nil {
+		result := responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, h.pending, false, h.acceptedDiff)
+		result.ActionError = errorReviewFailed
+		writeJSON(response, http.StatusInternalServerError, result)
+		return
+	}
+	h.pending.candidate = &candidate
+	h.pending.validationCode = ""
+	h.pending.validationItem = ""
+	h.pending.review = &reviewBinding{
+		baseRevision: snapshot.Revision(), candidateTree: candidate.Tree(), generation: h.pending.generation,
+		diff: string(diff), candidate: candidate,
+	}
+	writeJSON(response, http.StatusOK, responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, h.pending, false, h.acceptedDiff))
+}
+
+func (h *Handler) acceptChanges(response http.ResponseWriter, request *http.Request) {
+	payload, ok := h.decodeArchitectureAction(response, request)
+	if !ok {
+		return
+	}
+	h.stateMutex.Lock()
+	defer h.stateMutex.Unlock()
+	if h.loadedSnapshot == nil || h.loadedProject == nil || payload.SourceRoot != h.loadedProject.sourceRoot {
+		writeJSON(response, http.StatusConflict, errorResponse{Code: errorArchitectureNotOpen})
+		return
+	}
+	if h.loadedStale {
+		writeJSON(response, http.StatusConflict, errorResponse{Code: errorArchitectureStale})
+		return
+	}
+	snapshot := *h.loadedSnapshot
+	pending := h.pending
+	if pending == nil || pending.review == nil {
+		writeJSON(response, http.StatusConflict, errorResponse{Code: errorReviewFailed})
+		return
+	}
+	review := pending.review
+	if pending.storeID != snapshot.StoreID() || pending.baseRevision != snapshot.Revision() ||
+		review.baseRevision != pending.baseRevision || review.generation != pending.generation ||
+		pending.candidate == nil || review.candidateTree != pending.candidate.Tree() || review.candidateTree != review.candidate.Tree() {
+		pending.review = nil
+		result := responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, pending, false, h.acceptedDiff)
+		result.ActionError = errorReviewChanged
+		writeJSON(response, http.StatusConflict, result)
+		return
+	}
+	// Once the human confirms, the local authority transition must reach a
+	// classified boundary even if the browser disconnects before the response.
+	transitionContext, cancelTransition := context.WithTimeout(context.Background(), architectureTransitionTimeout)
+	defer cancelTransition()
+
+	observed, present, err := h.architecture.AcceptedRevision(transitionContext, snapshot)
+	if err != nil || !present {
+		h.loadedStale = true
+		pending.review = nil
+		result := responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, pending, true, h.acceptedDiff)
+		result.ActionError = errorUpdateUncertain
+		writeJSON(response, http.StatusConflict, result)
+		return
+	}
+	if observed != review.baseRevision {
+		h.markStale(pending)
+		result := responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, pending, true, h.acceptedDiff)
+		result.ActionError = errorArchitectureStale
+		writeJSON(response, http.StatusConflict, result)
+		return
+	}
+
+	successor, err := h.architecture.CreateSuccessor(transitionContext, snapshot, review.candidate)
+	if err != nil {
+		result := responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, pending, false, h.acceptedDiff)
+		result.ActionError = errorUpdateFailed
+		writeJSON(response, http.StatusInternalServerError, result)
+		return
+	}
+	if updateErr := h.architecture.AdvanceAccepted(transitionContext, snapshot, successor); updateErr != nil {
+		observationContext, cancelObservation := context.WithTimeout(context.Background(), architectureObservationTimeout)
+		observed, present, observeErr := h.architecture.AcceptedRevision(observationContext, snapshot)
+		cancelObservation()
+		if observeErr != nil || !present {
+			h.loadedStale = true
+			pending.review = nil
+			result := responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, pending, true, h.acceptedDiff)
+			result.ActionError = errorUpdateUncertain
+			writeJSON(response, http.StatusInternalServerError, result)
+			return
+		}
+		if observed != successor && observed != review.baseRevision {
+			h.markStale(pending)
+			result := responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, pending, true, h.acceptedDiff)
+			result.ActionError = errorArchitectureStale
+			writeJSON(response, http.StatusConflict, result)
+			return
+		}
+		if observed == review.baseRevision {
+			result := responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, pending, false, h.acceptedDiff)
+			result.ActionError = errorUpdateFailed
+			writeJSON(response, http.StatusInternalServerError, result)
+			return
+		}
+	}
+	// The authoritative ref names our successor. Consume the pending change
+	// before any fallible publication or response work.
+	h.pending = nil
+	h.acceptedDiff = review.diff
+	acceptedSnapshot := review.candidate.SnapshotAt(successor)
+	if h.publicationFailure != nil {
+		if err := h.publicationFailure(); err != nil {
+			recoveryContext, cancelRecovery := context.WithTimeout(context.Background(), architectureTransitionTimeout)
+			recovered, loadErr := h.architecture.LoadAccepted(recoveryContext, snapshot.StoreID())
+			cancelRecovery()
+			if loadErr == nil {
+				h.loadedSnapshot = &recovered
+				h.loadedStale = false
+			} else {
+				h.loadedStale = true
+			}
+			result := responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, *h.loadedSnapshot, nil, h.loadedStale, h.acceptedDiff)
+			result.ActionError = errorUpdatedReload
+			writeJSON(response, http.StatusInternalServerError, result)
+			return
+		}
+	}
+	h.loadedSnapshot = &acceptedSnapshot
+	h.loadedStale = false
+	writeJSON(response, http.StatusOK, responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, acceptedSnapshot, nil, false, h.acceptedDiff))
+}
+
+func (h *Handler) markStale(pending *pendingChangeSet) {
+	h.loadedStale = true
+	pending.review = nil
+}
+
+func (h *Handler) recordCandidateValidation(pending *pendingChangeSet, err error) {
+	pending.candidate = nil
+	pending.validationCode = "change_invalid"
+	pending.validationItem = ""
+	var componentError *architecture.ComponentValidationError
+	if errors.As(err, &componentError) {
+		pending.validationItem = componentError.ComponentID
+	}
+	switch {
+	case errors.Is(err, architecture.ErrTitleRequired):
+		pending.validationCode = "title_required"
+	case errors.Is(err, architecture.ErrTitleOneLine):
+		pending.validationCode = "title_one_line"
+	case !errors.Is(err, architecture.ErrInvalid):
+		pending.validationCode = "change_unavailable"
+	}
+}
+
+func (h *Handler) decodeArchitectureAction(response http.ResponseWriter, request *http.Request) (openProjectRequest, bool) {
+	if request.Header.Get("Origin") != h.expectedOrigin {
+		writeJSON(response, http.StatusForbidden, errorResponse{Code: errorOriginMismatch})
+		return openProjectRequest{}, false
+	}
+	request.Body = http.MaxBytesReader(response, request.Body, maxRequestBody)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	var payload openProjectRequest
+	if err := decoder.Decode(&payload); err != nil || ensureJSONEnd(decoder) != nil {
+		writeJSON(response, http.StatusBadRequest, errorResponse{Code: errorLookupFailed})
+		return openProjectRequest{}, false
+	}
+	return payload, true
 }
 
 func writeArchitectureLoadError(response http.ResponseWriter, err error) {

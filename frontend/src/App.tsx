@@ -15,6 +15,9 @@ type ArchitectureResult = {
   component_titles: string[]
   components: AuthoringComponent[]
   changes?: ChangesInProgress
+  stale?: boolean
+  parent_diff?: string
+  action_error?: string
 }
 
 type AuthoringComponent = {
@@ -30,6 +33,15 @@ type ChangesInProgress = {
   valid: boolean
   validation_code?: string
   validation_item?: string
+  review?: ChangeReview
+  review_blocker?: string
+}
+
+type ChangeReview = {
+  diff: string
+  base_revision: string
+  candidate_tree: string
+  generation: number
 }
 
 type ComponentEditor = {
@@ -71,12 +83,15 @@ export function App() {
   const [state, setState] = useState<ViewState>({ kind: 'idle' })
   const [editor, setEditor] = useState<ComponentEditor | null>(null)
   const [authoringError, setAuthoringError] = useState('')
+  const [architectureNotice, setArchitectureNotice] = useState('')
+  const [architectureBusy, setArchitectureBusy] = useState(false)
 
   async function inspectProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const trimmedSourceRoot = sourceRoot.trim()
     setSourceRoot(trimmedSourceRoot)
     setState({ kind: 'looking' })
+    setArchitectureNotice('')
 
     try {
       const response = await postJSON('/api/projects/open', { source_root: trimmedSourceRoot })
@@ -171,6 +186,42 @@ export function App() {
     }
   }
 
+  async function reviewChanges(result: ArchitectureResult) {
+    setArchitectureBusy(true)
+    setArchitectureNotice('')
+    try {
+      const response = await postJSON('/api/architecture/review', { source_root: result.source_root })
+      const payload = (await response.json()) as ArchitectureResult | ErrorPayload
+      if ('state' in payload) {
+        setState({ kind: 'ready', value: payload })
+      } else {
+        setArchitectureNotice(messageForArchitectureAction('code' in payload ? payload.code : undefined))
+      }
+    } catch {
+      setArchitectureNotice("WorkBraid couldn't prepare these changes for review. Try again.")
+    } finally {
+      setArchitectureBusy(false)
+    }
+  }
+
+  async function updateArchitecture(result: ArchitectureResult) {
+    setArchitectureBusy(true)
+    setArchitectureNotice('')
+    try {
+      const response = await postJSON('/api/architecture/accept', { source_root: result.source_root })
+      const payload = (await response.json()) as ArchitectureResult | ErrorPayload
+      if ('state' in payload) {
+        setState({ kind: 'ready', value: payload })
+      } else {
+        setArchitectureNotice(messageForArchitectureAction('code' in payload ? payload.code : undefined))
+      }
+    } catch {
+      setArchitectureNotice("WorkBraid couldn't update the architecture. Try again.")
+    } finally {
+      setArchitectureBusy(false)
+    }
+  }
+
   const busy = state.kind === 'looking' || state.kind === 'setting-up'
 
   return (
@@ -249,7 +300,12 @@ export function App() {
             {state.kind === 'setting-up' && <p className="lookup-status">Setting up architecture…</p>}
             {state.kind === 'ready' && (
               <div className="message">
-                <h2>Architecture ready</h2>
+                <h2>{state.value.stale ? 'Architecture changed' : 'Architecture ready'}</h2>
+                {state.value.stale && <p>This view is out of date. Open the project again to see the latest architecture.</p>}
+                {state.value.action_error && !state.value.changes && (
+                  <p className="review-error" role="alert">{messageForArchitectureAction(state.value.action_error)}</p>
+                )}
+                {architectureNotice && <p className="review-error" role="alert">{architectureNotice}</p>}
                 {state.value.component_count === 0 ? (
                   <p>This project has an empty architecture.</p>
                 ) : (
@@ -262,15 +318,15 @@ export function App() {
                       {(state.value.components ?? []).map((component) => (
                         <li key={component.id}>
                           <span>{component.title}</span>
-                          <button className="text-action" type="button" onClick={() => editAccepted(component, state.value)}>
-                            Edit
-                          </button>
+                          {!state.value.stale && (
+                            <button className="text-action" type="button" onClick={() => editAccepted(component, state.value)}>Edit</button>
+                          )}
                         </li>
                       ))}
                     </ul>
                   </div>
                 )}
-                <div className="authoring-actions">
+                {!state.value.stale && <div className="authoring-actions">
                   <button
                     className="inline-action"
                     type="button"
@@ -281,7 +337,7 @@ export function App() {
                   >
                     Add component
                   </button>
-                </div>
+                </div>}
                 {state.value.changes && state.value.changes.components.length > 0 && (
                   <section className="changes-in-progress" aria-labelledby="changes-heading">
                     <h3 id="changes-heading">Changes in progress</h3>
@@ -290,12 +346,41 @@ export function App() {
                       {state.value.changes.components.map((component) => (
                         <li key={component.id}>
                           <span>{component.title.trim() || 'Untitled component'}</span>
-                          <button className="text-action" type="button" onClick={() => editPending(component)}>
-                            Edit
-                          </button>
+                          {!state.value.stale && (
+                            <button className="text-action" type="button" onClick={() => editPending(component)}>Edit</button>
+                          )}
                         </li>
                       ))}
                     </ul>
+                    {state.value.changes.review_blocker && (
+                      <p className="review-error" role="alert">{messageForReviewBlocker(state.value.changes.review_blocker)}</p>
+                    )}
+                    {state.value.action_error && !state.value.changes.review_blocker && (
+                      <p className="review-error" role="alert">{messageForArchitectureAction(state.value.action_error)}</p>
+                    )}
+                    {!state.value.stale && !state.value.changes.review && (
+                      <button className="inline-action review-action" type="button" disabled={architectureBusy} onClick={() => reviewChanges(state.value)}>
+                        {architectureBusy ? 'Preparing…' : 'Review changes'}
+                      </button>
+                    )}
+                    {state.value.changes.review && !state.value.stale && (
+                      <section className="change-review" aria-labelledby="review-heading">
+                        <h3 id="review-heading">Review changes</h3>
+                        <p>Inspect the complete change before updating the architecture.</p>
+                        <pre>{state.value.changes.review.diff}</pre>
+                        <details>
+                          <summary>Review details</summary>
+                          <dl>
+                            <dt>Base revision</dt><dd>{state.value.changes.review.base_revision}</dd>
+                            <dt>Candidate tree</dt><dd>{state.value.changes.review.candidate_tree}</dd>
+                            <dt>Change version</dt><dd>{state.value.changes.review.generation}</dd>
+                          </dl>
+                        </details>
+                        <button className="inline-action review-action" type="button" disabled={architectureBusy} onClick={() => updateArchitecture(state.value)}>
+                          {architectureBusy ? 'Updating…' : 'Update architecture'}
+                        </button>
+                      </section>
+                    )}
                   </section>
                 )}
                 {editor && (
@@ -337,6 +422,12 @@ export function App() {
                     <dt>Revision</dt>
                     <dd>{state.value.revision}</dd>
                   </dl>
+                  {state.value.parent_diff && (
+                    <div className="accepted-diff">
+                      <h3>Parent diff</h3>
+                      <pre>{state.value.parent_diff}</pre>
+                    </div>
+                  )}
                 </details>
               </div>
             )}
@@ -462,4 +553,20 @@ function messageForAuthoringError(code?: string) {
   if (code === 'component_not_found') return 'That component is no longer available to edit.'
   if (code === 'architecture_not_open') return 'Open the project again, then try your change.'
   return "WorkBraid couldn't keep that change. Try again."
+}
+
+function messageForReviewBlocker(code?: string) {
+  if (code === 'title_required') return 'Add a title to the untitled component before updating architecture.'
+  if (code === 'title_one_line') return 'Use a one-line component title before updating architecture.'
+  return 'Correct the component changes before updating architecture.'
+}
+
+function messageForArchitectureAction(code?: string) {
+  if (code === 'architecture_stale') return 'These changes are out of date because the architecture changed.'
+  if (code === 'review_changed') return 'The changes were edited after this review. Review them again before updating architecture.'
+  if (code === 'updated_reload') return 'Architecture was updated, but this page could not refresh. Open the project again.'
+  if (code === 'update_uncertain') return 'WorkBraid could not confirm the current architecture. Open the project again.'
+  if (code === 'update_failed') return "WorkBraid couldn't update the architecture. Try again."
+  if (code === 'review_failed') return "WorkBraid couldn't prepare these changes for review. Try again."
+  return "WorkBraid couldn't complete that action. Try again."
 }

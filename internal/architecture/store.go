@@ -136,6 +136,11 @@ type Candidate struct {
 
 func (candidate Candidate) Tree() string       { return candidate.tree }
 func (candidate Candidate) Snapshot() Snapshot { return candidate.snapshot }
+func (candidate Candidate) SnapshotAt(revision string) Snapshot {
+	snapshot := candidate.snapshot
+	snapshot.revision = revision
+	return snapshot
+}
 
 var (
 	ErrTitleRequired = errors.New("component title is required")
@@ -582,6 +587,53 @@ func (manager *Manager) ConstructCandidate(ctx context.Context, base Snapshot, c
 		return Candidate{}, err
 	}
 	return Candidate{tree: tree, snapshot: snapshot}, nil
+}
+
+// AcceptedRevision observes only the authoritative accepted ref for the
+// snapshot's private store. It does not load or fall back to another ref.
+func (manager *Manager) AcceptedRevision(ctx context.Context, snapshot Snapshot) (string, bool, error) {
+	storePath, err := manager.StorePath(snapshot.storeID.String())
+	if err != nil {
+		return "", false, err
+	}
+	return manager.git.resolveRef(ctx, storePath, acceptedRef)
+}
+
+// CandidateDiff returns review evidence for the exact base and candidate
+// trees. The bytes are predictable presentation, not canonical state.
+func (manager *Manager) CandidateDiff(ctx context.Context, base Snapshot, candidate Candidate) ([]byte, error) {
+	if base.storeID != candidate.snapshot.storeID {
+		return nil, fmt.Errorf("candidate belongs to another Architecture store")
+	}
+	storePath, err := manager.StorePath(base.storeID.String())
+	if err != nil {
+		return nil, err
+	}
+	return manager.git.diffTrees(ctx, storePath, base.revision, candidate.tree)
+}
+
+// CreateSuccessor creates a non-canonical commit object. Authority changes
+// only if AdvanceAccepted subsequently succeeds.
+func (manager *Manager) CreateSuccessor(ctx context.Context, base Snapshot, candidate Candidate) (string, error) {
+	if base.storeID != candidate.snapshot.storeID {
+		return "", fmt.Errorf("candidate belongs to another Architecture store")
+	}
+	storePath, err := manager.StorePath(base.storeID.String())
+	if err != nil {
+		return "", err
+	}
+	return manager.git.makeSuccessorCommit(ctx, storePath, candidate.tree, base.revision)
+}
+
+// AdvanceAccepted performs the mandatory compare-and-swap. A nil result is the
+// acceptance success boundary; callers observe the ref only to classify a
+// failed update, never by parsing Git's diagnostic text.
+func (manager *Manager) AdvanceAccepted(ctx context.Context, base Snapshot, successor string) error {
+	storePath, err := manager.StorePath(base.storeID.String())
+	if err != nil {
+		return err
+	}
+	return manager.git.updateRef(ctx, storePath, acceptedRef, successor, base.revision)
 }
 
 func validNewComponentPath(path string) bool {

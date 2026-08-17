@@ -259,6 +259,121 @@ describe('App', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
+  it('reviews the complete canonical diff before deliberately updating architecture', async () => {
+    const base = '1'.repeat(40)
+    const candidate = '2'.repeat(40)
+    const successor = '3'.repeat(40)
+    const pending = {
+      source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: base,
+      component_count: 0, component_titles: [], components: [],
+      changes: { valid: true, components: [{ id: 'worker-id', title: 'Worker', description: 'Does work.\n', new: true }] },
+    }
+    const reviewed = {
+      ...pending,
+      changes: {
+        ...pending.changes,
+        review: {
+          diff: 'diff --git a/components/worker.md b/components/worker.md\n+id: "worker-id"\n+# Worker\n',
+          base_revision: base,
+          candidate_tree: candidate,
+          generation: 1,
+        },
+      },
+    }
+    const accepted = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: successor,
+      component_count: 1, component_titles: ['Worker'], components: [{ id: 'worker-id', title: 'Worker', description: 'Does work.\n' }],
+      parent_diff: reviewed.changes.review.diff,
+    }
+    const fetchMock = mockResponses([pending, reviewed, accepted])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+
+    expect(await screen.findByRole('button', { name: 'Review changes' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Update architecture' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Review changes' }))
+
+    expect(await screen.findByRole('heading', { name: 'Review changes' })).toBeInTheDocument()
+    expect(screen.getByText(/diff --git a\/components\/worker\.md/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Update architecture' })).toBeInTheDocument()
+    const reviewDetails = screen.getByText('Review details').closest('details') as HTMLElement
+    expect(within(reviewDetails).getByText(base)).toBeInTheDocument()
+    expect(within(reviewDetails).getByText(candidate)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Update architecture' }))
+
+    expect(await screen.findByText('This architecture has 1 component.')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Changes in progress' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Update architecture' })).not.toBeInTheDocument()
+    const technicalDetails = screen.getByText('Technical details').closest('details') as HTMLElement
+    expect(within(technicalDetails).getByText(successor)).toBeInTheDocument()
+    expect(within(technicalDetails).getByRole('heading', { name: 'Parent diff' })).toBeInTheDocument()
+    expect(requestPath(fetchMock, 1)).toBe('/api/architecture/review')
+    expect(requestPath(fetchMock, 2)).toBe('/api/architecture/accept')
+  })
+
+  it('turns an invalid quiet pending title into actionable guidance only at review', async () => {
+    const pending = {
+      source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: '1'.repeat(40),
+      component_count: 0, component_titles: [], components: [],
+      changes: { valid: false, validation_code: 'title_required', validation_item: 'worker-id', components: [{ id: 'worker-id', title: '', description: '', new: true }] },
+    }
+    const blocked = { ...pending, action_error: 'review_failed', changes: { ...pending.changes, review_blocker: 'title_required' } }
+    mockResponses([pending, blocked], [200, 422])
+    render(<App />)
+    await submitPath('/tmp/example')
+
+    expect(await screen.findByText('Untitled component')).toBeInTheDocument()
+    expect(screen.queryByText(/add a title/i)).not.toBeInTheDocument()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Review changes' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Add a title to the untitled component before updating architecture.')
+    expect(screen.queryByRole('button', { name: 'Update architecture' })).not.toBeInTheDocument()
+    expect(screen.getByText('Untitled component')).toBeInTheDocument()
+  })
+
+  it('marks a stale accepted view read-only while preserving visible changes in progress', async () => {
+    const stale = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: '1'.repeat(40), stale: true,
+      action_error: 'architecture_stale', component_count: 1, component_titles: ['Gateway'],
+      components: [{ id: 'gateway-id', title: 'Gateway', description: 'Accepted.\n' }],
+      changes: { valid: true, components: [{ id: 'gateway-id', title: 'Public Gateway', description: 'Pending.\n', new: false }] },
+    }
+    mockResponses([stale])
+    render(<App />)
+    await submitPath('/tmp/example')
+
+    expect(await screen.findByRole('heading', { name: 'Architecture changed' })).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('These changes are out of date because the architecture changed.')
+    expect(screen.getByText('Public Gateway')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /edit|add component|review changes|update architecture/i })).not.toBeInTheDocument()
+    expect(screen.queryByText(/merge|rebase|overwrite|repair/i)).not.toBeInTheDocument()
+  })
+
+  it('requires a fresh review when pending changes mutate after the displayed review', async () => {
+    const reviewed = {
+      source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: '1'.repeat(40),
+      component_count: 0, component_titles: [], components: [],
+      changes: {
+        valid: true,
+        components: [{ id: 'worker-id', title: 'Worker', description: '', new: true }],
+        review: { diff: 'diff --git a/components/worker.md b/components/worker.md', base_revision: '1'.repeat(40), candidate_tree: '2'.repeat(40), generation: 1 },
+      },
+    }
+    const changed = { ...reviewed, action_error: 'review_changed', changes: { valid: true, components: reviewed.changes.components } }
+    mockResponses([reviewed, changed], [200, 409])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Update architecture' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The changes were edited after this review. Review them again before updating architecture.')
+    expect(screen.getByText('Worker')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Review changes' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Update architecture' })).not.toBeInTheDocument()
+  })
+
   it.each([
     ['architecture_unavailable', 409, 'Architecture unavailable', 'could not open the architecture linked to this project'],
     ['architecture_invalid', 409, 'Architecture needs attention', "could not read this project's architecture"],

@@ -78,9 +78,29 @@ func (gitRunner) makeBootstrapCommit(ctx context.Context, repository, tree strin
 	return strings.TrimSpace(string(output)), err
 }
 
+func (gitRunner) makeSuccessorCommit(ctx context.Context, repository, tree, parent string) (string, error) {
+	output, err := runGit(ctx, []byte("Update Architecture\n"), "--git-dir", repository, "commit-tree", tree, "-p", parent)
+	return strings.TrimSpace(string(output)), err
+}
+
 func (gitRunner) createRef(ctx context.Context, repository, ref, object string) error {
 	_, err := runGit(ctx, nil, "--git-dir", repository, "update-ref", ref, object, zeroObject)
 	return err
+}
+
+func (gitRunner) updateRef(ctx context.Context, repository, ref, object, expected string) error {
+	_, err := runGit(ctx, nil, "--git-dir", repository, "update-ref", ref, object, expected)
+	return err
+}
+
+func (gitRunner) diffTrees(ctx context.Context, repository, baseTree, candidateTree string) ([]byte, error) {
+	return runGit(ctx, nil,
+		"--git-dir", repository,
+		"diff-tree", "--no-commit-id", "-r", "-p",
+		"--no-ext-diff", "--no-textconv", "--no-color",
+		"--src-prefix=a/", "--dst-prefix=b/",
+		baseTree, candidateTree,
+	)
 }
 
 func (gitRunner) treeEntries(ctx context.Context, repository, revision string) ([]treeEntry, error) {
