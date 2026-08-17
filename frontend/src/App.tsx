@@ -287,24 +287,14 @@ export function App() {
                     <h3 id="changes-heading">Changes in progress</h3>
                     <p>These changes have not updated the architecture yet.</p>
                     <ul>
-                      {state.value.changes.components.map((component) => {
-                        const componentValidation = validationMessage(state.value.changes, component.id)
-                        return (
-                          <li key={component.id}>
-                            <div className="change-item-copy">
-                              <span>{component.title.trim() || 'Untitled component'}</span>
-                              {componentValidation && (
-                                <p className="change-validation" role="alert">
-                                  {componentValidation}
-                                </p>
-                              )}
-                            </div>
-                            <button className="text-action" type="button" onClick={() => editPending(component)}>
-                              Edit
-                            </button>
-                          </li>
-                        )
-                      })}
+                      {state.value.changes.components.map((component) => (
+                        <li key={component.id}>
+                          <span>{component.title.trim() || 'Untitled component'}</span>
+                          <button className="text-action" type="button" onClick={() => editPending(component)}>
+                            Edit
+                          </button>
+                        </li>
+                      ))}
                     </ul>
                   </section>
                 )}
@@ -317,8 +307,6 @@ export function App() {
                       value={editor.title}
                       onChange={(event) => setEditor({ ...editor, title: event.target.value, titleChanged: true })}
                       autoComplete="off"
-                      aria-invalid={Boolean(validationMessage(state.value.changes, editor.id))}
-                      aria-describedby={validationMessage(state.value.changes, editor.id) ? 'component-validation' : undefined}
                     />
                     <label htmlFor="component-description">Description</label>
                     <textarea
@@ -327,11 +315,6 @@ export function App() {
                       onChange={(event) => setEditor({ ...editor, description: event.target.value, descriptionChanged: true })}
                       rows={8}
                     />
-                    {validationMessage(state.value.changes, editor.id) && (
-                      <p className="authoring-error" id="component-validation">
-                        {validationMessage(state.value.changes, editor.id)}
-                      </p>
-                    )}
                     {authoringError && (
                       <p className="authoring-error" role="alert">
                         {authoringError}
@@ -471,14 +454,6 @@ function messageForError(code?: string) {
     return errorMessages[code as ErrorCode]
   }
   return errorMessages.lookup_failed
-}
-
-function validationMessage(changes?: ChangesInProgress, componentID?: string) {
-  if (!changes || changes.valid || !componentID || changes.validation_item !== componentID) return ''
-  if (changes.validation_code === 'title_required') return 'Add a title.'
-  if (changes.validation_code === 'title_one_line') return 'Use a one-line title.'
-  if (changes.validation_code === 'change_unavailable') return "WorkBraid couldn't check these changes. Try again."
-  return 'Check this component and try again.'
 }
 
 function messageForAuthoringError(code?: string) {

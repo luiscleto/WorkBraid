@@ -78,7 +78,7 @@ Extend the integrated I2.1 application with one authoring vertical slice:
 - on successful validation, retain the complete immutable candidate snapshot pinned to the candidate tree and the exact accepted base, without publishing it as the loaded accepted snapshot;
 - on validation failure, retain the submitted pending authored values and validation result in the backend so the human can correct them. Do not discard the change set, partially publish a candidate snapshot, or alter accepted Architecture;
 - distinguish accepted components from **Changes in progress** in the UI. Pending changes may project their current Title and Description, but must not be presented as accepted;
-- use short product-language validation feedback that tells the person what to correct. Do not pipe parser, YAML, Git, UUID, filename, blob, tree, ref, snapshot, canonical, store, or base-revision terminology into normal UI;
+- allow a structurally invalid value to remain a non-canonical change in progress without turning **Keep change** into a false acceptance boundary. Represent an empty normalized Title plainly as **Untitled component**; do not add a non-actionable inline candidate-validation error merely because the pending change is not yet committable. I2.3's deliberate review/commit flow must prevent acceptance of an invalid candidate and surface the blocking validation there;
 - keep the I2.1 component inventory compact and transitional. Add only the controls and in-progress state necessary for this authoring task; do not create a component dashboard or map precursor;
 - retain expected-origin enforcement, no permissive CORS behavior, bounded request bodies, and backend ownership for every new read/mutation operation;
 - leave the user's source repository untouched;
@@ -124,7 +124,7 @@ Use the real compatible Git executable, real temporary bare repositories, real f
 - Correct the invalid value and prove the same pending change set again produces a complete valid candidate containing all accumulated changes.
 - Instantiate/reload a fresh browser client against the same still-running backend and prove it retrieves the backend-held accepted authoring context, pending Title/Description values, and validation state.
 - Prove browser reload does not recreate the change set from browser storage and does not claim persistence across backend restart.
-- Frontend tests cover Add component, accepted-component editing, Changes in progress, invalid feedback, correction, and same-process reload continuation in language consistent with `docs/ui-v0.md`.
+- Frontend tests cover Add component, accepted-component editing, Changes in progress, truthful **Untitled component** state, correction, and same-process reload continuation in language consistent with `docs/ui-v0.md`.
 
 ### Authority, local-web, and source-isolation evidence
 
@@ -149,7 +149,7 @@ The implementation is ready for independent review only when:
 - a new component receives a generated opaque UUID, collision-safe creation-time direct `.md` filename, minimal closed v1 frontmatter, ATX H1, no relationships, and `100644` mode;
 - one complete candidate is constructed from the exact accepted base, reusing every unchanged entry/blob exactly and serializing only changed or new canonical files;
 - one Architecture-owned candidate construction/validation path validates the complete result and constructs an immutable candidate snapshot; no separate preview and future-commit semantics exist;
-- invalid authored state remains in the backend-held pending change set with useful product-language feedback, accepted state remains untouched, and correction restores a complete valid candidate;
+- invalid authored state remains in the backend-held pending change set as truthful non-canonical work in progress, accepted state remains untouched, and correction restores a complete valid candidate; I2.2 does not present candidate invalidity as a failed acceptance attempt;
 - browser reload against the same running backend retrieves and continues the same submitted pending changes; cross-process recovery is neither implemented nor implied;
 - `refs/heads/accepted`, its commit/tree, and the loaded accepted snapshot remain completely unchanged, with no accepted successor commit or ref mutation;
 - the accepted-snapshot loader from I2.1 remains the sole accepted-state interpretation path and the browser independently parses no canonical Markdown/frontmatter;
@@ -195,7 +195,7 @@ The reviewer checks:
 5. **Creation semantics:** new IDs are generated and stable, filenames are direct and collision-safe at creation time, source is closed v1 with ATX H1/no relationships, and mode is `100644`.
 6. **Candidate integrity:** construction starts from the exact base, reuses unchanged entries/blobs exactly, changes only intended canonical files, and validates the complete candidate before yielding an immutable candidate snapshot.
 7. **Single candidate path:** production has one concrete candidate construction/validation interpretation suitable for I2.3 reuse, not parallel preview/commit or browser/backend semantics.
-8. **Failure behavior:** invalid authored values and useful validation feedback remain backend-held; no partial candidate is published, accepted state does not change, correction restores a valid complete candidate, and no retry is mislabeled as accepted.
+8. **Failure behavior:** invalid authored values and their validation result remain backend-held; normal UI may represent an empty Title as **Untitled component** without a non-actionable error; no partial candidate is published, accepted state does not change, correction restores a valid complete candidate, and no retry is mislabeled as accepted.
 9. **Product surface:** the UI follows `ui-v0.md`, uses component/Title/Description/Changes in progress language, and does not expose frontmatter, UUIDs, filenames, blobs, trees, refs, snapshots, canonical state, or base SHAs in the normal flow.
 10. **Boundaries and evidence:** origin/CORS protection and source isolation hold; no SQLite Architecture state appears; real Git/filesystem/SQLite and same-process browser-reload evidence is bounded and green; approved documents remain unchanged.
 
@@ -223,7 +223,7 @@ Use the built browser UI served by the real Go process, the real compatible Git 
 5. Through structured controls, edit one accepted component's Title and Description, including a Title with representative Markdown punctuation and surrounding whitespace. Verify the UI retains the normalized plain Title, presents it as a change in progress, keeps its accepted identity/relationship implicitly intact, preserves the component's existing ATX or Setext heading form unless round-trip correctness requires otherwise, and does not present the accepted inventory/revision as updated.
 6. Add one new component with a Title and Description. Verify both the accepted-component edit and new component coexist in the same Changes in progress surface.
 7. Reload the browser page without stopping the backend. Reopen the same project if the normal application flow requires it, and verify WorkBraid retrieves and continues both backend-held changes with their authored values.
-8. Submit a blank or whitespace-only Title. Verify useful product-language feedback appears and neither existing pending change is discarded. Reload once more against the same backend and verify the invalid authored value and changes remain available for correction.
+8. Submit a blank or whitespace-only Title. Verify the pending item becomes **Untitled component**, no acceptance or canonical update is implied, and neither existing pending change is discarded. Reload once more against the same backend and verify the invalid authored value and changes remain available for correction without requiring a non-actionable inline error.
 9. Correct the Title and verify the complete pending candidate becomes valid again with both component changes still present.
 10. Using read-only technical inspection, prove `refs/heads/accepted`, its exact commit/tree and accepted component blobs, and the loaded accepted snapshot revision/content remain identical to the values recorded before authoring. Confirm no successor commit/ref was created and no review/commit/accept action is present.
 11. Verify the source repository's `HEAD`, tracked/untracked status, files, and content checksums remain unchanged. Verify the operational association did not logically change and no SQLite Architecture/pending projection was created.
