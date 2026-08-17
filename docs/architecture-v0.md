@@ -133,6 +133,10 @@ Deliberately changing the ID creates replacement/new identity rather than an ord
 
 After YAML frontmatter and optional whitespace, the first Markdown block is the required level-one heading and canonical component title. A usable title is non-empty after trimming. Both CommonMark ATX and Setext level-one headings are accepted on load; WorkBraid-generated component files use an ATX H1. The remainder is the component body. The title is not duplicated in frontmatter.
 
+The canonical component H1 remains Markdown source. The structured component Title is its human-readable text projection, not its Markdown source spelling. That projection parses inline Markdown into text: it resolves escapes and entities; discards emphasis, strong, and strikethrough formatting while retaining their text; retains code-span text and visible link text without destinations; and treats raw HTML as literal inert text. Leading and trailing whitespace is trimmed, and the resulting Title must be non-empty.
+
+WorkBraid normalizes a submitted structured Title by trimming leading and trailing whitespace. When serializing that Title into an H1, WorkBraid escapes or encodes the text as needed so parsing the resulting H1 yields the same normalized structured Title. This is a projection and serialization rule, not a separate title encoding or portable metadata field.
+
 The literal v1 component frontmatter shape is:
 
 ```yaml
@@ -349,6 +353,8 @@ Initial UI does not require:
 - raw-frontmatter editing.
 
 All controls edit the pending change set, never canonical Git directly.
+
+For an existing component, a Description-only edit preserves the H1 bytes exactly. If a submitted normalized Title is unchanged, its existing H1 bytes are also preserved exactly. If the Title changes, WorkBraid replaces the H1 using the plain-text Title projection and serialization rules above; it does not attempt to preserve inline Markdown formatting that the structured editor does not expose. The existing ATX or Setext heading form is preserved unless doing so would conflict with the Title round-trip invariant.
 
 ## 8. First-slice map
 
