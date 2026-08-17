@@ -328,12 +328,15 @@ func TestLoadAcceptedProjectsInlineMarkdownTitlesToHumanReadableText(t *testing.
 	storePath, _ := manager.StorePath(storeID)
 	manifest := gitBytes(t, "--git-dir", storePath, "show", bootstrap.Revision()+":architecture.yaml")
 	atxID := uuid.NewString()
-	setextID := uuid.NewString()
+	softSetextID := uuid.NewString()
+	hardSetextID := uuid.NewString()
 	atx := []byte("---\nid: \"" + atxID + "\"\n---\n# Escaped \\*star\\* &amp; *em* **strong** ~~gone~~ `code *raw*` [label](https://secret.invalid) <b>Thing</b>\nBody\n")
-	setext := []byte("---\nid: \"" + setextID + "\"\n---\n  A &amp; B  \n=============\nBody\n")
+	softSetext := []byte("---\nid: \"" + softSetextID + "\"\n---\nFirst &amp; line\nsecond *line*\n=============\nBody\n")
+	hardSetext := []byte("---\nid: \"" + hardSetextID + "\"\n---\nHard first  \nsecond `line`\n=============\nBody\n")
 	componentTree := mktree(t, storePath,
 		"100644 blob "+writeTestBlob(t, storePath, atx)+"\tatx.md\n"+
-			"100644 blob "+writeTestBlob(t, storePath, setext)+"\tsetext.md\n")
+			"100644 blob "+writeTestBlob(t, storePath, hardSetext)+"\thard-setext.md\n"+
+			"100644 blob "+writeTestBlob(t, storePath, softSetext)+"\tsoft-setext.md\n")
 	accepted := commitManifestTree(t, storePath, manifest, "100644", []string{"040000 tree " + componentTree + "\tcomponents"})
 	gitText(t, "--git-dir", storePath, "update-ref", acceptedRef, accepted, bootstrap.Revision())
 
@@ -348,8 +351,11 @@ func TestLoadAcceptedProjectsInlineMarkdownTitlesToHumanReadableText(t *testing.
 	if got[atxID] != "Escaped *star* & em strong gone code *raw* label <b>Thing</b>" {
 		t.Fatalf("ATX projected title = %q", got[atxID])
 	}
-	if got[setextID] != "A & B" {
-		t.Fatalf("Setext projected title = %q", got[setextID])
+	if got[softSetextID] != "First & line second line" {
+		t.Fatalf("soft-break Setext projected title = %q", got[softSetextID])
+	}
+	if got[hardSetextID] != "Hard first second line" {
+		t.Fatalf("hard-break Setext projected title = %q", got[hardSetextID])
 	}
 }
 
@@ -367,7 +373,7 @@ func TestConstructCandidatePreservesExactExistingSourceSectionsAndAcceptedAuthor
 	setextID := uuid.NewString()
 	untouchedID := uuid.NewString()
 	atx := []byte("---\r\nid: \"" + atxID + "\"\r\nrelationships:\r\n  - target: \"" + setextID + "\"\r\n    label: \"calls\"\r\n---\r\n \r\n# Old API #\r\n\r\nATX body  \r\n")
-	setext := []byte("---\nid: \"" + setextID + "\"\n---\nOld *worker*\n============\n\nSetext body\n")
+	setext := []byte("---\nid: \"" + setextID + "\"\n---\nOld *worker*\ncontinued\n============\n\nSetext body\n")
 	untouched := []byte("---\nid: \"" + untouchedID + "\"\n---\n# Records\nExact untouched body\n")
 	atxBlob := writeTestBlob(t, storePath, atx)
 	setextBlob := writeTestBlob(t, storePath, setext)
@@ -383,7 +389,7 @@ func TestConstructCandidatePreservesExactExistingSourceSectionsAndAcceptedAuthor
 
 	changes := []ComponentChange{
 		{ID: atxID, Path: "components/odd-name.md", Title: "New API", Description: "\r\nATX body  \r\n"},
-		{ID: setextID, Path: "components/worker.md", Title: "Old worker", Description: "\nChanged body\n"},
+		{ID: setextID, Path: "components/worker.md", Title: "Old worker continued", Description: "\nChanged body\n"},
 	}
 	candidate, err := manager.ConstructCandidate(context.Background(), base, changes)
 	if err != nil {
@@ -398,7 +404,7 @@ func TestConstructCandidatePreservesExactExistingSourceSectionsAndAcceptedAuthor
 		t.Fatalf("ATX title edit changed unrelated bytes\ngot:  %q\nwant: %q", gotATX, wantATX)
 	}
 	gotSetext := gitBytes(t, "--git-dir", storePath, "show", candidate.Tree()+":components/worker.md")
-	wantSetext := []byte("---\nid: \"" + setextID + "\"\n---\nOld *worker*\n============\n\nChanged body\n")
+	wantSetext := []byte("---\nid: \"" + setextID + "\"\n---\nOld *worker*\ncontinued\n============\n\nChanged body\n")
 	if !bytes.Equal(gotSetext, wantSetext) {
 		t.Fatalf("description edit changed frontmatter or H1\ngot:  %q\nwant: %q", gotSetext, wantSetext)
 	}

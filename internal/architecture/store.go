@@ -741,6 +741,9 @@ func plainHeadingText(heading *ast.Heading, source []byte) ([]byte, error) {
 			return ast.WalkSkipChildren, nil
 		case *ast.Text:
 			result.Write(resolveMarkdownText(value.Value(source)))
+			if value.SoftLineBreak() || value.HardLineBreak() {
+				result.WriteByte(' ')
+			}
 		case *ast.String:
 			if value.IsCode() || value.IsRaw() {
 				result.Write(value.Value)

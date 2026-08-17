@@ -144,6 +144,34 @@ func TestPendingComponentAuthoringUsesOneBackendCandidateAndLeavesAcceptedUnchan
 	}
 }
 
+func TestPendingDescriptionEditPreservesMultilineSetextTitle(t *testing.T) {
+	db := openWebTestDatabase(t)
+	source := createSourceRepository(t)
+	dataDirectory := t.TempDir()
+	handler := NewHandler(db, testOrigin, t.TempDir(), dataDirectory)
+	initialized := decodeArchitectureResponse(t, postInitializeProject(t, handler, testOrigin, source))
+	storeID := associatedStoreID(t, db, filepath.Clean(source))
+	storePath := filepath.Join(dataDirectory, "architecture", storeID+".git")
+	manifest := []byte(runGit(t, dataDirectory, "--git-dir", storePath, "show", initialized.Revision+":architecture.yaml") + "\n")
+	componentID := uuid.NewString()
+	sourceBytes := []byte("---\nid: \"" + componentID + "\"\n---\nFirst *line*\nsecond line\n===========\nOriginal body\n")
+	accepted := advanceAcceptedToComponents(t, storePath, initialized.Revision, manifest, []testComponent{
+		{path: "multiline.md", mode: "100644", source: sourceBytes},
+	})
+	opened := decodeArchitectureResponse(t, postOpenProject(t, handler, testOrigin, source))
+	if opened.Revision != accepted || strings.Join(opened.ComponentTitles, "|") != "First line second line" {
+		t.Fatalf("opened multiline title = %+v", opened)
+	}
+
+	edited := postComponentMutation(t, handler, testOrigin, "/api/architecture/components/edit", componentMutationRequest{
+		SourceRoot: filepath.Clean(source), ComponentID: componentID, Title: "First line second line", Description: "Changed body\n",
+	})
+	body := decodeArchitectureResponse(t, edited)
+	if edited.Code != http.StatusOK || body.Changes == nil || !body.Changes.Valid || len(body.Changes.Components) != 1 || body.Changes.Components[0].Title != "First line second line" {
+		t.Fatalf("multiline description edit status=%d body=%s", edited.Code, edited.Body.String())
+	}
+}
+
 func TestConcurrentComponentMutationsAccumulateWithoutLostChanges(t *testing.T) {
 	db := openWebTestDatabase(t)
 	source := createSourceRepository(t)
