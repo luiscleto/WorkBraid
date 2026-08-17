@@ -214,6 +214,21 @@ Use the built browser UI served by the real Go process, the real compatible Git 
 
 Record **PASS** only if valid components reconstruct through a genuinely new process at the exact accepted revision, the invalid revision fails without partial publication or fallback, both loads remain logically read-only, the source repositories remain untouched, and the UI remains the approved compact transitional surface.
 
+## Execution result
+
+Status: Complete — human checkpoint **PASS** on 2026-08-17
+
+- Approved Increment 2 planning baseline: `94953141f87f178b40bfea33de0ed4a3af908a83`.
+- Docs-inclusive worker base and approved I2.1 packet commit: `29f3b25845bff35c93770912c23ad95fcb62f2d4`.
+- Initial I2.1 implementation commit: `708c89f90733f6ca7fcdd42d4a2dc9d3b4ef643e`.
+- Corrected and integrated I2.1 implementation SHA: `e554c45d4fcc74a6e30b55e41fbef4e7385cbdcb`.
+- Independent review: the first fresh review found one bounded evidence gap covering string-valued invalid component UUIDs and complete retained-field reconstruction. The worker added test-only coverage; a second fresh independent review reported no actionable findings.
+- Automated validation: PASS for `git diff --check`, uncached and race-enabled Go tests, Go vet, module verification, 20 frontend tests, production frontend build, bounded real-Git component validation, read-only authority/source checks, fresh-Manager reconstruction, and real-process component restart.
+- Human valid-state validation: PASS. WorkBraid loaded a compact three-component inventory (`Gateway`, `Records`, `Worker`) at exact accepted revision `4d44aaf391dbece41362620de0bb3f9f9ebb31d6`; a completely stopped and newly started process reconstructed the same revision, count, and titles.
+- Human invalid-state validation: PASS. Accepted revision `f4982edf9f81fae50324aae11e527114bc5258f8` contained an unresolved relationship target and produced “Architecture needs attention” with no partial component inventory or fallback.
+- Successful and failed loads left accepted refs/object counts, SQLite association rows, source-repository `HEAD`, tracked/untracked status, files, and content checksums unchanged.
+- I2.2 was not started.
+
 ## Stop boundary
 
 I2.1 completes only after integration, fresh independent review, automated real-system checks, and the real human checkpoint pass. Stop there. Do not prepare or implement I2.2, candidate authoring, accepted commits, relationship UI, Markdown rendering, or map behavior without explicit human approval.
