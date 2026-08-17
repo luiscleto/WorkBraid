@@ -48,7 +48,7 @@ func TestPendingComponentAuthoringUsesOneBackendCandidateAndLeavesAcceptedUnchan
 	reachableBefore := runGit(t, dataDirectory, "--git-dir", storePath, "rev-list", "--objects", "--all")
 
 	edited := postComponentMutation(t, handler, testOrigin, "/api/architecture/components/edit", componentMutationRequest{
-		SourceRoot: filepath.Clean(source), ComponentID: apiID, Title: "  Gateway  ", Description: "\nChanged API body\n",
+		SourceRoot: filepath.Clean(source), ComponentID: apiID, Title: "  Gateway  ", Description: "\nChanged API body\n", TitleChanged: true, DescriptionChanged: true,
 	})
 	editedBody := decodeArchitectureResponse(t, edited)
 	if edited.Code != http.StatusOK || editedBody.Changes == nil || !editedBody.Changes.Valid || len(editedBody.Changes.Components) != 1 || editedBody.Changes.Components[0].Title != "Gateway" {
@@ -75,7 +75,7 @@ func TestPendingComponentAuthoringUsesOneBackendCandidateAndLeavesAcceptedUnchan
 	}
 
 	invalid := postComponentMutation(t, handler, testOrigin, "/api/architecture/components/edit", componentMutationRequest{
-		SourceRoot: filepath.Clean(source), ComponentID: newID, Title: "   ", Description: "\nNew API body\n",
+		SourceRoot: filepath.Clean(source), ComponentID: newID, Title: "   ", TitleChanged: true,
 	})
 	invalidBody := decodeArchitectureResponse(t, invalid)
 	if invalid.Code != http.StatusOK || invalidBody.Changes == nil || invalidBody.Changes.Valid || invalidBody.Changes.ValidationCode != "title_required" || invalidBody.Changes.ValidationItem != newID || len(invalidBody.Changes.Components) != 2 {
@@ -94,7 +94,7 @@ func TestPendingComponentAuthoringUsesOneBackendCandidateAndLeavesAcceptedUnchan
 		t.Fatalf("same-process reload lost pending state: %+v", reloaded.Changes)
 	}
 	corrected := postComponentMutation(t, handler, testOrigin, "/api/architecture/components/edit", componentMutationRequest{
-		SourceRoot: filepath.Clean(source), ComponentID: newID, Title: "  API helper  ", Description: "\nNew API body\n",
+		SourceRoot: filepath.Clean(source), ComponentID: newID, Title: "  API helper  ", TitleChanged: true,
 	})
 	correctedBody := decodeArchitectureResponse(t, corrected)
 	if correctedBody.Changes == nil || !correctedBody.Changes.Valid || len(correctedBody.Changes.Components) != 2 {
@@ -144,31 +144,50 @@ func TestPendingComponentAuthoringUsesOneBackendCandidateAndLeavesAcceptedUnchan
 	}
 }
 
-func TestPendingDescriptionEditPreservesMultilineSetextTitle(t *testing.T) {
+func TestPendingFieldIntentPreservesUntouchedCanonicalSections(t *testing.T) {
 	db := openWebTestDatabase(t)
 	source := createSourceRepository(t)
 	dataDirectory := t.TempDir()
-	handler := NewHandler(db, testOrigin, t.TempDir(), dataDirectory)
+	state, handler := newHandler(db, testOrigin, t.TempDir(), dataDirectory)
 	initialized := decodeArchitectureResponse(t, postInitializeProject(t, handler, testOrigin, source))
 	storeID := associatedStoreID(t, db, filepath.Clean(source))
 	storePath := filepath.Join(dataDirectory, "architecture", storeID+".git")
 	manifest := []byte(runGit(t, dataDirectory, "--git-dir", storePath, "show", initialized.Revision+":architecture.yaml") + "\n")
-	componentID := uuid.NewString()
-	sourceBytes := []byte("---\nid: \"" + componentID + "\"\n---\nFirst *line*\nsecond line\n===========\nOriginal body\n")
+	titleOnlyID := uuid.NewString()
+	descriptionOnlyID := uuid.NewString()
+	titleOnlySource := []byte("---\r\nid: \"" + titleOnlyID + "\"\r\n---\r\n# Original\r\n\r\nExact body  \r\nSecond exact\r\n")
+	descriptionOnlySource := []byte("---\nid: \"" + descriptionOnlyID + "\"\n---\nFirst *line*\nsecond line\n===========\nOriginal body\n")
 	accepted := advanceAcceptedToComponents(t, storePath, initialized.Revision, manifest, []testComponent{
-		{path: "multiline.md", mode: "100644", source: sourceBytes},
+		{path: "title-only.md", mode: "100644", source: titleOnlySource},
+		{path: "description-only.md", mode: "100644", source: descriptionOnlySource},
 	})
 	opened := decodeArchitectureResponse(t, postOpenProject(t, handler, testOrigin, source))
-	if opened.Revision != accepted || strings.Join(opened.ComponentTitles, "|") != "First line second line" {
-		t.Fatalf("opened multiline title = %+v", opened)
+	if opened.Revision != accepted || strings.Join(opened.ComponentTitles, "|") != "First line second line|Original" {
+		t.Fatalf("opened titles = %+v", opened)
 	}
 
-	edited := postComponentMutation(t, handler, testOrigin, "/api/architecture/components/edit", componentMutationRequest{
-		SourceRoot: filepath.Clean(source), ComponentID: componentID, Title: "First line second line", Description: "Changed body\n",
+	titleEdited := postComponentMutation(t, handler, testOrigin, "/api/architecture/components/edit", componentMutationRequest{
+		SourceRoot: filepath.Clean(source), ComponentID: titleOnlyID, Title: "Renamed", Description: "\nExact body  \nSecond exact\n", TitleChanged: true,
 	})
-	body := decodeArchitectureResponse(t, edited)
-	if edited.Code != http.StatusOK || body.Changes == nil || !body.Changes.Valid || len(body.Changes.Components) != 1 || body.Changes.Components[0].Title != "First line second line" {
-		t.Fatalf("multiline description edit status=%d body=%s", edited.Code, edited.Body.String())
+	if body := decodeArchitectureResponse(t, titleEdited); titleEdited.Code != http.StatusOK || body.Changes == nil || !body.Changes.Valid {
+		t.Fatalf("title-only edit status=%d body=%s", titleEdited.Code, titleEdited.Body.String())
+	}
+	titleCandidate := runGit(t, dataDirectory, "--git-dir", storePath, "show", state.pending.candidate.Tree()+":components/title-only.md")
+	wantTitleCandidate := "---\r\nid: \"" + titleOnlyID + "\"\r\n---\r\n# Renamed\r\n\r\nExact body  \r\nSecond exact"
+	if titleCandidate != wantTitleCandidate {
+		t.Fatalf("title-only edit changed canonical body bytes\ngot:  %q\nwant: %q", titleCandidate, wantTitleCandidate)
+	}
+
+	descriptionEdited := postComponentMutation(t, handler, testOrigin, "/api/architecture/components/edit", componentMutationRequest{
+		SourceRoot: filepath.Clean(source), ComponentID: descriptionOnlyID, Title: "First line second line", Description: "Changed body\n", DescriptionChanged: true,
+	})
+	if body := decodeArchitectureResponse(t, descriptionEdited); descriptionEdited.Code != http.StatusOK || body.Changes == nil || !body.Changes.Valid {
+		t.Fatalf("description-only edit status=%d body=%s", descriptionEdited.Code, descriptionEdited.Body.String())
+	}
+	descriptionCandidate := runGit(t, dataDirectory, "--git-dir", storePath, "show", state.pending.candidate.Tree()+":components/description-only.md")
+	wantDescriptionCandidate := "---\nid: \"" + descriptionOnlyID + "\"\n---\nFirst *line*\nsecond line\n===========\nChanged body"
+	if descriptionCandidate != wantDescriptionCandidate {
+		t.Fatalf("description-only edit changed canonical H1 bytes\ngot:  %q\nwant: %q", descriptionCandidate, wantDescriptionCandidate)
 	}
 }
 
@@ -192,8 +211,8 @@ func TestConcurrentComponentMutationsAccumulateWithoutLostChanges(t *testing.T) 
 	}
 
 	requests := []componentMutationRequest{
-		{SourceRoot: filepath.Clean(source), ComponentID: firstID, Title: "First changed", Description: "First body\n"},
-		{SourceRoot: filepath.Clean(source), ComponentID: secondID, Title: "Second changed", Description: "Second body\n"},
+		{SourceRoot: filepath.Clean(source), ComponentID: firstID, Title: "First changed", TitleChanged: true},
+		{SourceRoot: filepath.Clean(source), ComponentID: secondID, Title: "Second changed", TitleChanged: true},
 	}
 	responses := make([]*httptest.ResponseRecorder, len(requests))
 	var wait sync.WaitGroup

@@ -48,6 +48,11 @@ type pendingChangeSet struct {
 }
 
 func NewHandler(db *sql.DB, expectedOrigin, uiDirectory, dataDirectory string) http.Handler {
+	_, mux := newHandler(db, expectedOrigin, uiDirectory, dataDirectory)
+	return mux
+}
+
+func newHandler(db *sql.DB, expectedOrigin, uiDirectory, dataDirectory string) (*Handler, http.Handler) {
 	handler := &Handler{
 		db:             db,
 		expectedOrigin: expectedOrigin,
@@ -60,7 +65,7 @@ func NewHandler(db *sql.DB, expectedOrigin, uiDirectory, dataDirectory string) h
 	mux.HandleFunc("POST /api/architecture/components/add", handler.addComponent)
 	mux.HandleFunc("POST /api/architecture/components/edit", handler.editComponent)
 	mux.Handle("/", handler.staticFiles())
-	return mux
+	return handler, mux
 }
 
 type openProjectRequest struct {
@@ -272,10 +277,12 @@ func (h *Handler) currentArchitectureResponse() architectureResponse {
 }
 
 type componentMutationRequest struct {
-	SourceRoot  string `json:"source_root"`
-	ComponentID string `json:"component_id,omitempty"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
+	SourceRoot         string `json:"source_root"`
+	ComponentID        string `json:"component_id,omitempty"`
+	Title              string `json:"title,omitempty"`
+	Description        string `json:"description,omitempty"`
+	TitleChanged       bool   `json:"title_changed,omitempty"`
+	DescriptionChanged bool   `json:"description_changed,omitempty"`
 }
 
 func (h *Handler) addComponent(response http.ResponseWriter, request *http.Request) {
@@ -349,14 +356,19 @@ func (h *Handler) mutateComponent(response http.ResponseWriter, request *http.Re
 		}
 		if changeIndex < 0 {
 			var found bool
-			change, found = snapshot.ChangeForAcceptedComponent(payload.ComponentID, payload.Title, payload.Description)
+			change, found = snapshot.ChangeForAcceptedComponent(payload.ComponentID)
 			if !found {
 				writeJSON(response, http.StatusNotFound, errorResponse{Code: errorComponentNotFound})
 				return
 			}
-		} else {
+		}
+		if payload.TitleChanged {
 			change.Title = payload.Title
+			change.TitleChanged = true
+		}
+		if payload.DescriptionChanged {
 			change.Description = payload.Description
+			change.DescriptionChanged = true
 		}
 	}
 	if changeIndex >= 0 {

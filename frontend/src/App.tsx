@@ -37,6 +37,8 @@ type ComponentEditor = {
   id?: string
   title: string
   description: string
+  titleChanged: boolean
+  descriptionChanged: boolean
 }
 
 type ErrorCode =
@@ -108,12 +110,14 @@ export function App() {
       id: component.id,
       title: pending?.title ?? component.title,
       description: pending?.description ?? component.description,
+      titleChanged: false,
+      descriptionChanged: false,
     })
   }
 
   function editPending(component: PendingComponent) {
     setAuthoringError('')
-    setEditor({ kind: 'edit', id: component.id, title: component.title, description: component.description })
+    setEditor({ kind: 'edit', id: component.id, title: component.title, description: component.description, titleChanged: false, descriptionChanged: false })
   }
 
   async function submitComponent(event: FormEvent<HTMLFormElement>, result: ArchitectureResult) {
@@ -125,8 +129,9 @@ export function App() {
       const response = await postJSON(endpoint, {
         source_root: result.source_root,
         ...(editor.id ? { component_id: editor.id } : {}),
-        title: editor.title,
-        description: editor.description,
+        ...(editor.kind === 'add' || editor.titleChanged ? { title: editor.title } : {}),
+        ...(editor.kind === 'add' || editor.descriptionChanged ? { description: editor.description } : {}),
+        ...(editor.kind === 'edit' ? { title_changed: editor.titleChanged, description_changed: editor.descriptionChanged } : {}),
       })
       const payload = (await response.json()) as ArchitectureResult | ErrorPayload
       if (!response.ok || !('state' in payload)) {
@@ -139,7 +144,7 @@ export function App() {
       } else {
         const invalid = payload.changes?.components.find((change) => change.id === payload.changes?.validation_item)
         if (invalid) {
-          setEditor({ kind: 'edit', id: invalid.id, title: invalid.title, description: invalid.description })
+          setEditor({ kind: 'edit', id: invalid.id, title: invalid.title, description: invalid.description, titleChanged: false, descriptionChanged: false })
         }
       }
     } catch {
@@ -271,7 +276,7 @@ export function App() {
                     type="button"
                     onClick={() => {
                       setAuthoringError('')
-                      setEditor({ kind: 'add', title: '', description: '' })
+                      setEditor({ kind: 'add', title: '', description: '', titleChanged: false, descriptionChanged: false })
                     }}
                   >
                     Add component
@@ -300,14 +305,14 @@ export function App() {
                     <input
                       id="component-title"
                       value={editor.title}
-                      onChange={(event) => setEditor({ ...editor, title: event.target.value })}
+                      onChange={(event) => setEditor({ ...editor, title: event.target.value, titleChanged: true })}
                       autoComplete="off"
                     />
                     <label htmlFor="component-description">Description</label>
                     <textarea
                       id="component-description"
                       value={editor.description}
-                      onChange={(event) => setEditor({ ...editor, description: event.target.value })}
+                      onChange={(event) => setEditor({ ...editor, description: event.target.value, descriptionChanged: true })}
                       rows={8}
                     />
                     {(authoringError || validationMessage(state.value.changes, editor.id)) && (

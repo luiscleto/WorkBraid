@@ -174,8 +174,41 @@ describe('App', () => {
     expect(requestPath(fetchMock, 1)).toBe('/api/architecture/components/edit')
     expect(requestBody(fetchMock, 1)).toEqual({
       source_root: '/tmp/example', component_id: 'api-id', title: 'Gateway', description: '\nChanged body\n',
+      title_changed: true, description_changed: true,
     })
     expect(requestPath(fetchMock, 2)).toBe('/api/architecture/components/add')
+  })
+
+  it('sends explicit title-only intent without an untouched CRLF description', async () => {
+    const accepted = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: 'f'.repeat(40),
+      component_count: 1, component_titles: ['API'],
+      components: [{ id: 'api-id', title: 'API', description: '\r\nExact body  \r\nSecond exact\r\n' }],
+    }
+    const edited = {
+      ...accepted,
+      changes: {
+        valid: true,
+        components: [{ id: 'api-id', title: 'Gateway', description: accepted.components[0].description, new: false }],
+      },
+    }
+    const fetchMock = mockResponses([accepted, edited])
+    render(<App />)
+    await submitPath('/tmp/example')
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+    await user.clear(screen.getByLabelText('Title'))
+    await user.type(screen.getByLabelText('Title'), 'Gateway')
+    await user.click(screen.getByRole('button', { name: 'Keep change' }))
+
+    expect(requestBody(fetchMock, 1)).toEqual({
+      source_root: '/tmp/example',
+      component_id: 'api-id',
+      title: 'Gateway',
+      title_changed: true,
+      description_changed: false,
+    })
   })
 
   it('retrieves invalid backend-held changes after a browser reload and keeps them correctable', async () => {

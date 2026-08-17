@@ -388,8 +388,8 @@ func TestConstructCandidatePreservesExactExistingSourceSectionsAndAcceptedAuthor
 	authorityBefore := acceptedAuthorityState(t, storePath)
 
 	changes := []ComponentChange{
-		{ID: atxID, Path: "components/odd-name.md", Title: "New API", Description: "\r\nATX body  \r\n"},
-		{ID: setextID, Path: "components/worker.md", Title: "Old worker continued", Description: "\nChanged body\n"},
+		{ID: atxID, Path: "components/odd-name.md", Title: "New API", Description: "\nATX body  \n", TitleChanged: true},
+		{ID: setextID, Path: "components/worker.md", Title: "Old worker continued", Description: "\nChanged body\n", DescriptionChanged: true},
 	}
 	candidate, err := manager.ConstructCandidate(context.Background(), base, changes)
 	if err != nil {
@@ -420,7 +420,7 @@ func TestConstructCandidatePreservesExactExistingSourceSectionsAndAcceptedAuthor
 	}
 
 	setextTitleCandidate, err := manager.ConstructCandidate(context.Background(), base, []ComponentChange{
-		{ID: setextID, Path: "components/worker.md", Title: "New worker", Description: "\nSetext body\n"},
+		{ID: setextID, Path: "components/worker.md", Title: "New worker", Description: "\nSetext body\n", TitleChanged: true},
 	})
 	if err != nil {
 		t.Fatalf("construct Setext title candidate: %v", err)
@@ -506,8 +506,8 @@ func TestStructuredPlainTitlesRoundTripThroughRealCandidateParsing(t *testing.T)
 		t.Run(title, func(t *testing.T) {
 			created := manager.NewComponentChange(base, nil, title, "New body\n")
 			candidate, err := manager.ConstructCandidate(context.Background(), base, []ComponentChange{
-				{ID: atxID, Path: "components/atx.md", Title: title, Description: "ATX body\n"},
-				{ID: setextID, Path: "components/setext.md", Title: title, Description: "Setext body\n"},
+				{ID: atxID, Path: "components/atx.md", Title: title, Description: "ATX body\n", TitleChanged: true},
+				{ID: setextID, Path: "components/setext.md", Title: title, Description: "Setext body\n", TitleChanged: true},
 				created,
 			})
 			if err != nil {

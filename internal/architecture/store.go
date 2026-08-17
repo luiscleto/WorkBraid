@@ -97,7 +97,7 @@ func (snapshot Snapshot) AuthoringComponents() []AuthoringComponent {
 	return components
 }
 
-func (snapshot Snapshot) ChangeForAcceptedComponent(id, title, description string) (ComponentChange, bool) {
+func (snapshot Snapshot) ChangeForAcceptedComponent(id string) (ComponentChange, bool) {
 	parsed, err := uuid.Parse(id)
 	if err != nil {
 		return ComponentChange{}, false
@@ -106,8 +106,8 @@ func (snapshot Snapshot) ChangeForAcceptedComponent(id, title, description strin
 		if component.id == parsed {
 			return ComponentChange{
 				ID:          component.id.String(),
-				Title:       title,
-				Description: description,
+				Title:       component.title,
+				Description: string(component.body),
 				Path:        component.path,
 			}, true
 		}
@@ -119,11 +119,13 @@ func (snapshot Snapshot) ChangeForAcceptedComponent(id, title, description strin
 // Architecture change set. Its path and identity are assigned by the backend,
 // never by browser input.
 type ComponentChange struct {
-	ID          string
-	Title       string
-	Description string
-	Path        string
-	New         bool
+	ID                 string
+	Title              string
+	Description        string
+	Path               string
+	New                bool
+	TitleChanged       bool
+	DescriptionChanged bool
 }
 
 // Candidate is a completely constructed and validated non-canonical tree.
@@ -431,11 +433,13 @@ func (manager *Manager) NewComponentChange(base Snapshot, changes []ComponentCha
 		path = fmt.Sprintf("components/%s-%d.md", slug, suffix)
 	}
 	return ComponentChange{
-		ID:          uuid.NewString(),
-		Title:       title,
-		Description: description,
-		Path:        path,
-		New:         true,
+		ID:                 uuid.NewString(),
+		Title:              title,
+		Description:        description,
+		Path:               path,
+		New:                true,
+		TitleChanged:       true,
+		DescriptionChanged: true,
 	}
 }
 
@@ -534,7 +538,7 @@ func (manager *Manager) ConstructCandidate(ctx context.Context, base Snapshot, c
 				return Candidate{}, fmt.Errorf("%w: changed component does not belong to the accepted base", ErrInvalid)
 			}
 			mode = accepted.mode
-			source = editedComponentSource(accepted, change.Title, change.Description)
+			source = editedComponentSource(accepted, change)
 			if bytes.Equal(source, accepted.source) {
 				continue
 			}
@@ -592,16 +596,16 @@ func newComponentSource(change ComponentChange) []byte {
 	return []byte(fmt.Sprintf("---\nid: %q\n---\n# %s\n%s", change.ID, escapeMarkdownTitle(change.Title), change.Description))
 }
 
-func editedComponentSource(accepted component, title, description string) []byte {
+func editedComponentSource(accepted component, change ComponentChange) []byte {
 	heading := accepted.source[accepted.headingStart:accepted.headingEnd]
-	if title != accepted.title {
-		heading = replacementHeading(accepted, title)
+	if change.TitleChanged && change.Title != accepted.title {
+		heading = replacementHeading(accepted, change.Title)
 	}
 	body := accepted.body
-	if description != string(accepted.body) {
-		body = []byte(description)
+	if change.DescriptionChanged {
+		body = []byte(change.Description)
 	}
-	source := make([]byte, 0, len(accepted.source)+len(title)+len(description))
+	source := make([]byte, 0, len(accepted.source)+len(change.Title)+len(change.Description))
 	source = append(source, accepted.source[:accepted.headingStart]...)
 	source = append(source, heading...)
 	source = append(source, body...)
