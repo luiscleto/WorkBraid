@@ -287,14 +287,24 @@ export function App() {
                     <h3 id="changes-heading">Changes in progress</h3>
                     <p>These changes have not updated the architecture yet.</p>
                     <ul>
-                      {state.value.changes.components.map((component) => (
-                        <li key={component.id}>
-                          <span>{component.title.trim() || 'Untitled component'}</span>
-                          <button className="text-action" type="button" onClick={() => editPending(component)}>
-                            Edit
-                          </button>
-                        </li>
-                      ))}
+                      {state.value.changes.components.map((component) => {
+                        const componentValidation = validationMessage(state.value.changes, component.id)
+                        return (
+                          <li key={component.id}>
+                            <div className="change-item-copy">
+                              <span>{component.title.trim() || 'Untitled component'}</span>
+                              {componentValidation && (
+                                <p className="change-validation" role="alert">
+                                  {componentValidation}
+                                </p>
+                              )}
+                            </div>
+                            <button className="text-action" type="button" onClick={() => editPending(component)}>
+                              Edit
+                            </button>
+                          </li>
+                        )
+                      })}
                     </ul>
                   </section>
                 )}
@@ -307,6 +317,8 @@ export function App() {
                       value={editor.title}
                       onChange={(event) => setEditor({ ...editor, title: event.target.value, titleChanged: true })}
                       autoComplete="off"
+                      aria-invalid={Boolean(validationMessage(state.value.changes, editor.id))}
+                      aria-describedby={validationMessage(state.value.changes, editor.id) ? 'component-validation' : undefined}
                     />
                     <label htmlFor="component-description">Description</label>
                     <textarea
@@ -315,9 +327,14 @@ export function App() {
                       onChange={(event) => setEditor({ ...editor, description: event.target.value, descriptionChanged: true })}
                       rows={8}
                     />
-                    {(authoringError || validationMessage(state.value.changes, editor.id)) && (
+                    {validationMessage(state.value.changes, editor.id) && (
+                      <p className="authoring-error" id="component-validation">
+                        {validationMessage(state.value.changes, editor.id)}
+                      </p>
+                    )}
+                    {authoringError && (
                       <p className="authoring-error" role="alert">
-                        {authoringError || validationMessage(state.value.changes, editor.id)}
+                        {authoringError}
                       </p>
                     )}
                     <div className="button-group">
