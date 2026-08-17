@@ -230,6 +230,23 @@ Use the built browser UI served by the real Go process, the real compatible Git 
 
 Record **PASS** only if the edit and addition coexist in one backend-owned exact-base change set, browser reload retrieves them from the still-running backend, invalid input remains correctable without loss, correction restores one structurally valid complete candidate, accepted Git and the loaded accepted snapshot remain exact and unchanged, the source repository remains untouched, and the UI stays within the approved product language and I2.2 scope.
 
+## Execution result
+
+Status: Complete — human checkpoint **PASS** on 2026-08-17
+
+- Approved Increment 2 planning baseline: `94953141f87f178b40bfea33de0ed4a3af908a83`.
+- Completed I2.1 prerequisite and I2.2 planning base: `6b115142144a11ea3615302a9bc4002f6aad0397`.
+- Approved docs-inclusive I2.2 worker base and execution-packet commit: `e6c54ef9fdaa4ea733ebb86aa0ca5cb08f877e85`.
+- Approved Title-projection Architecture/packet clarification: `7bbdc51db0076a64cb7909029308ac4479adf507`.
+- Final integrated I2.2 implementation and corrected behavior: `81800dfad3f75d3da53ea92cde1b22b7aced5ea0`.
+- Independent review: iterative fresh reviews found and bounded Title round-trip, multiline-heading, untouched-CRLF-body, and checkpoint-language issues before integration. The final fresh review of `b2e7534c384b60fd5658c2ad8300e11cd5cb7232..81800dfad3f75d3da53ea92cde1b22b7aced5ea0` reported no actionable findings and confirmed that quiet **Untitled component** pending state, backend validation retention, accepted authority, correction behavior, accessibility, and I2.2 scope match the approved packet.
+- Automated validation: PASS for `git diff --check`, `go mod verify`, uncached full Go tests, full race-enabled Go tests, Go vet, focused real-Git Architecture/HTTP/candidate/concurrency/reload tests, 23 frontend tests, and the production frontend build.
+- Human initialization evidence: PASS at bootstrap accepted revision `40424a628a4a09303aef111245405fe3f6ee5235` through the built UI and real Go process.
+- Human accepted-fixture evidence: PASS at exact accepted revision `0221bce181419fc80bf8df9140afc60b963e3785`, containing accepted `Gateway` and `Records` components plus one explicit relationship.
+- Human authoring evidence: PASS. One accepted component edit and one new component coexisted in the same Changes-in-progress set; browser reload against the same backend retrieved them; a whitespace-only Title remained quietly as **Untitled component** across reload; correction restored a valid complete candidate.
+- Authority and isolation evidence: PASS. `refs/heads/accepted` remained at `0221bce181419fc80bf8df9140afc60b963e3785`, its tree remained `3f156e07a43900800d14d14a0e0aa783da34dedc`, the loaded accepted revision/component inventory did not advance, and the throwaway source repository retained exact `HEAD`, tracked/untracked status, file list, and content checksums.
+- No accepted successor commit, ref advancement, diff-review flow, cross-process pending recovery, relationship authoring, Markdown rendering, map behavior, or I2.3 implementation entered I2.2.
+
 ## Stop boundary
 
 I2.2 completes only after integration, fresh independent review, automated real-system checks, and the real human checkpoint pass. Stop there. Do not prepare or implement I2.3, diff review, commit/ref advancement, relationship authoring, Markdown rendering, or map behavior without explicit human approval.
