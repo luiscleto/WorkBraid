@@ -68,6 +68,11 @@ func (gitRunner) makeBootstrapTree(ctx context.Context, repository, blob string)
 	return strings.TrimSpace(string(output)), err
 }
 
+func (gitRunner) makeTree(ctx context.Context, repository string, entries []byte) (string, error) {
+	output, err := runGit(ctx, entries, "--git-dir", repository, "mktree")
+	return strings.TrimSpace(string(output)), err
+}
+
 func (gitRunner) makeBootstrapCommit(ctx context.Context, repository, tree string) (string, error) {
 	output, err := runGit(ctx, []byte("Initialize Architecture\n"), "--git-dir", repository, "commit-tree", tree)
 	return strings.TrimSpace(string(output)), err

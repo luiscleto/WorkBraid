@@ -253,8 +253,8 @@ func TestNewApplicationInstanceReopensExactAcceptedComponents(t *testing.T) {
 	associationsBefore := snapshotAssociations(t, dbA)
 	openedA := postOpenProject(t, handlerA, testOrigin, repository)
 	assertComponentInventoryResponse(t, openedA, accepted, []string{"API", "Worker"})
-	if strings.Contains(openedA.Body.String(), apiID) || strings.Contains(openedA.Body.String(), workerID) || strings.Contains(openedA.Body.String(), "arbitrary api.md") {
-		t.Fatalf("component inventory exposed canonical details: %s", openedA.Body.String())
+	if strings.Contains(openedA.Body.String(), "arbitrary api.md") {
+		t.Fatalf("component inventory exposed canonical filename: %s", openedA.Body.String())
 	}
 	if after := snapshotPrivateArchitecture(t, dataDirectory); after != privateBefore {
 		t.Fatalf("component open changed private Architecture\nbefore:\n%s\nafter:\n%s", privateBefore, after)
@@ -291,6 +291,11 @@ func assertComponentInventoryResponse(t *testing.T, response *httptest.ResponseR
 		Revision        string   `json:"revision"`
 		ComponentCount  int      `json:"component_count"`
 		ComponentTitles []string `json:"component_titles"`
+		Components      []struct {
+			ID          string `json:"id"`
+			Title       string `json:"title"`
+			Description string `json:"description"`
+		} `json:"components"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &loaded); err != nil {
 		t.Fatal(err)
@@ -298,8 +303,13 @@ func assertComponentInventoryResponse(t *testing.T, response *httptest.ResponseR
 	if loaded.State != "ready" || loaded.Revision != revision || loaded.ComponentCount != len(titles) || strings.Join(loaded.ComponentTitles, "|") != strings.Join(titles, "|") {
 		t.Fatalf("component inventory response = %+v", loaded)
 	}
-	if strings.Contains(response.Body.String(), "API body") || strings.Contains(response.Body.String(), "Worker body") {
-		t.Fatalf("component response leaked canonical source: %s", response.Body.String())
+	if len(loaded.Components) != len(titles) {
+		t.Fatalf("structured authoring components = %+v", loaded.Components)
+	}
+	for _, component := range loaded.Components {
+		if _, err := uuid.Parse(component.ID); err != nil || component.Title == "" {
+			t.Fatalf("structured authoring component = %+v", component)
+		}
 	}
 }
 

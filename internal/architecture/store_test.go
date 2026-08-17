@@ -1,6 +1,7 @@
 package architecture
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -313,6 +314,116 @@ func TestLoadAcceptedComponentSnapshotFromRealGit(t *testing.T) {
 	}
 	if renamedAPI.id != uuid.MustParse(apiID) || renamedAPI.path != "components/renamed.md" || renamedAPI.title != "Shared title" {
 		t.Fatalf("renamed component identity/path/title = %s / %q / %q", renamedAPI.id, renamedAPI.path, renamedAPI.title)
+	}
+}
+
+func TestConstructCandidatePreservesExactExistingSourceSectionsAndAcceptedAuthority(t *testing.T) {
+	dataDirectory := t.TempDir()
+	manager := NewManager(dataDirectory)
+	storeID := uuid.NewString()
+	bootstrap, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath, _ := manager.StorePath(storeID)
+	manifest := gitBytes(t, "--git-dir", storePath, "show", bootstrap.Revision()+":architecture.yaml")
+	atxID := uuid.NewString()
+	setextID := uuid.NewString()
+	untouchedID := uuid.NewString()
+	atx := []byte("---\r\nid: \"" + atxID + "\"\r\nrelationships:\r\n  - target: \"" + setextID + "\"\r\n    label: \"calls\"\r\n---\r\n \r\n# Old API #\r\n\r\nATX body  \r\n")
+	setext := []byte("---\nid: \"" + setextID + "\"\n---\nOld worker\n==========\n\nSetext body\n")
+	untouched := []byte("---\nid: \"" + untouchedID + "\"\n---\n# Records\nExact untouched body\n")
+	atxBlob := writeTestBlob(t, storePath, atx)
+	setextBlob := writeTestBlob(t, storePath, setext)
+	untouchedBlob := writeTestBlob(t, storePath, untouched)
+	components := mktree(t, storePath, "100755 blob "+atxBlob+"\todd-name.md\n100644 blob "+untouchedBlob+"\trecords.md\n100644 blob "+setextBlob+"\tworker.md\n")
+	commit := commitManifestTree(t, storePath, manifest, "100644", []string{"040000 tree " + components + "\tcomponents"})
+	gitText(t, "--git-dir", storePath, "update-ref", acceptedRef, commit, bootstrap.Revision())
+	base, err := manager.LoadAccepted(context.Background(), storeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorityBefore := acceptedAuthorityState(t, storePath)
+
+	changes := []ComponentChange{
+		{ID: atxID, Path: "components/odd-name.md", Title: "New API", Description: "\r\nATX body  \r\n"},
+		{ID: setextID, Path: "components/worker.md", Title: "Old worker", Description: "\nChanged body\n"},
+	}
+	candidate, err := manager.ConstructCandidate(context.Background(), base, changes)
+	if err != nil {
+		t.Fatalf("construct candidate: %v", err)
+	}
+	if candidate.Snapshot().Revision() != candidate.Tree() || candidate.Snapshot().ComponentCount() != 3 {
+		t.Fatalf("candidate snapshot = revision %q, components %d, tree %q", candidate.Snapshot().Revision(), candidate.Snapshot().ComponentCount(), candidate.Tree())
+	}
+	gotATX := gitBytes(t, "--git-dir", storePath, "show", candidate.Tree()+":components/odd-name.md")
+	wantATX := []byte("---\r\nid: \"" + atxID + "\"\r\nrelationships:\r\n  - target: \"" + setextID + "\"\r\n    label: \"calls\"\r\n---\r\n \r\n# New API\r\n\r\nATX body  \r\n")
+	if !bytes.Equal(gotATX, wantATX) {
+		t.Fatalf("ATX title edit changed unrelated bytes\ngot:  %q\nwant: %q", gotATX, wantATX)
+	}
+	gotSetext := gitBytes(t, "--git-dir", storePath, "show", candidate.Tree()+":components/worker.md")
+	wantSetext := []byte("---\nid: \"" + setextID + "\"\n---\nOld worker\n==========\n\nChanged body\n")
+	if !bytes.Equal(gotSetext, wantSetext) {
+		t.Fatalf("description edit changed frontmatter or H1\ngot:  %q\nwant: %q", gotSetext, wantSetext)
+	}
+	if mode := strings.Fields(gitText(t, "--git-dir", storePath, "ls-tree", candidate.Tree(), "components/odd-name.md"))[0]; mode != "100755" {
+		t.Fatalf("edited mode = %q, want 100755", mode)
+	}
+	if entry := gitText(t, "--git-dir", storePath, "ls-tree", candidate.Tree(), "components/records.md"); !strings.Contains(entry, untouchedBlob) {
+		t.Fatalf("untouched component did not reuse base blob %q: %q", untouchedBlob, entry)
+	}
+	baseManifest := gitText(t, "--git-dir", storePath, "ls-tree", base.Revision(), "architecture.yaml")
+	if candidateManifest := gitText(t, "--git-dir", storePath, "ls-tree", candidate.Tree(), "architecture.yaml"); candidateManifest != baseManifest {
+		t.Fatalf("candidate manifest changed\nbase: %q\ncandidate: %q", baseManifest, candidateManifest)
+	}
+
+	setextTitleCandidate, err := manager.ConstructCandidate(context.Background(), base, []ComponentChange{
+		{ID: setextID, Path: "components/worker.md", Title: "New worker", Description: "\nSetext body\n"},
+	})
+	if err != nil {
+		t.Fatalf("construct Setext title candidate: %v", err)
+	}
+	gotSetextTitle := gitBytes(t, "--git-dir", storePath, "show", setextTitleCandidate.Tree()+":components/worker.md")
+	wantSetextTitle := []byte("---\nid: \"" + setextID + "\"\n---\nNew worker\n=\n\nSetext body\n")
+	if !bytes.Equal(gotSetextTitle, wantSetextTitle) {
+		t.Fatalf("Setext title edit changed frontmatter/body or heading style\ngot:  %q\nwant: %q", gotSetextTitle, wantSetextTitle)
+	}
+	if after := acceptedAuthorityState(t, storePath); after != authorityBefore {
+		t.Fatalf("candidate construction changed accepted authority\nbefore:\n%s\nafter:\n%s", authorityBefore, after)
+	}
+}
+
+func TestConstructCandidateAddsMultipleComponentsWithStableCreationPaths(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	storeID := uuid.NewString()
+	base, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := manager.NewComponentChange(base, nil, "API Gateway", "\nFirst body\n")
+	second := manager.NewComponentChange(base, []ComponentChange{first}, "API Gateway", "\nSecond body\n")
+	if first.Path != "components/api-gateway.md" || second.Path != "components/api-gateway-2.md" || first.ID == second.ID {
+		t.Fatalf("creation identity/paths = (%q, %q) / (%q, %q)", first.ID, first.Path, second.ID, second.Path)
+	}
+	candidate, err := manager.ConstructCandidate(context.Background(), base, []ComponentChange{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.Snapshot().ComponentCount() != 2 || base.ComponentCount() != 0 {
+		t.Fatalf("candidate/base components = %d/%d", candidate.Snapshot().ComponentCount(), base.ComponentCount())
+	}
+	storePath, _ := manager.StorePath(storeID)
+	for _, change := range []ComponentChange{first, second} {
+		source := gitBytes(t, "--git-dir", storePath, "show", candidate.Tree()+":"+change.Path)
+		if !bytes.HasPrefix(source, []byte("---\nid: \""+change.ID+"\"\n---\n# API Gateway\n")) || bytes.Contains(source, []byte("relationships")) {
+			t.Fatalf("new component source = %q", source)
+		}
+		if mode := strings.Fields(gitText(t, "--git-dir", storePath, "ls-tree", candidate.Tree(), change.Path))[0]; mode != "100644" {
+			t.Fatalf("new component mode = %q", mode)
+		}
+	}
+	if _, err := manager.ConstructCandidate(context.Background(), base, []ComponentChange{{ID: first.ID, Path: first.Path, Title: "   ", Description: first.Description, New: true}}); !errors.Is(err, ErrTitleRequired) {
+		t.Fatalf("blank title error = %v, want ErrTitleRequired", err)
 	}
 }
 

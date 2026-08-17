@@ -8,7 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -44,7 +46,19 @@ type component struct {
 	title         string
 	body          []byte
 	relationships []componentRelationship
+	mode          string
+	source        []byte
+	headingStart  int
+	headingEnd    int
+	headingStyle  headingStyle
 }
+
+type headingStyle uint8
+
+const (
+	headingATX headingStyle = iota
+	headingSetext
+)
 
 type componentRelationship struct {
 	target uuid.UUID
@@ -53,6 +67,7 @@ type componentRelationship struct {
 
 func (snapshot Snapshot) Revision() string    { return snapshot.revision }
 func (snapshot Snapshot) ComponentCount() int { return len(snapshot.components) }
+func (snapshot Snapshot) StoreID() string     { return snapshot.storeID.String() }
 func (snapshot Snapshot) ComponentTitles() []string {
 	titles := make([]string, len(snapshot.components))
 	for index := range snapshot.components {
@@ -60,6 +75,77 @@ func (snapshot Snapshot) ComponentTitles() []string {
 	}
 	return titles
 }
+
+// AuthoringComponent is the structured projection used by the local browser.
+// Canonical Markdown interpretation remains owned by the accepted loader.
+type AuthoringComponent struct {
+	ID          string
+	Title       string
+	Description string
+}
+
+func (snapshot Snapshot) AuthoringComponents() []AuthoringComponent {
+	components := make([]AuthoringComponent, len(snapshot.components))
+	for index := range snapshot.components {
+		components[index] = AuthoringComponent{
+			ID:          snapshot.components[index].id.String(),
+			Title:       snapshot.components[index].title,
+			Description: string(snapshot.components[index].body),
+		}
+	}
+	return components
+}
+
+func (snapshot Snapshot) ChangeForAcceptedComponent(id, title, description string) (ComponentChange, bool) {
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		return ComponentChange{}, false
+	}
+	for _, component := range snapshot.components {
+		if component.id == parsed {
+			return ComponentChange{
+				ID:          component.id.String(),
+				Title:       title,
+				Description: description,
+				Path:        component.path,
+			}, true
+		}
+	}
+	return ComponentChange{}, false
+}
+
+// ComponentChange is one addition or replacement in a multi-file pending
+// Architecture change set. Its path and identity are assigned by the backend,
+// never by browser input.
+type ComponentChange struct {
+	ID          string
+	Title       string
+	Description string
+	Path        string
+	New         bool
+}
+
+// Candidate is a completely constructed and validated non-canonical tree.
+type Candidate struct {
+	tree     string
+	snapshot Snapshot
+}
+
+func (candidate Candidate) Tree() string       { return candidate.tree }
+func (candidate Candidate) Snapshot() Snapshot { return candidate.snapshot }
+
+var (
+	ErrTitleRequired = errors.New("component title is required")
+	ErrTitleOneLine  = errors.New("component title must fit on one line")
+)
+
+type ComponentValidationError struct {
+	ComponentID string
+	Err         error
+}
+
+func (err *ComponentValidationError) Error() string { return err.Err.Error() }
+func (err *ComponentValidationError) Unwrap() error { return err.Err }
 
 type Manager struct {
 	storeRoot string
@@ -309,6 +395,8 @@ func (manager *Manager) load(ctx context.Context, storePath string, expectedStor
 		if _, duplicate := componentIDs[component.id]; duplicate {
 			return Snapshot{}, fmt.Errorf("%w: duplicate component ID %s", ErrInvalid, component.id)
 		}
+		component.mode = entry.Mode
+		component.source = append([]byte(nil), contents...)
 		componentIDs[component.id] = struct{}{}
 		components = append(components, component)
 	}
@@ -320,6 +408,233 @@ func (manager *Manager) load(ctx context.Context, storePath string, expectedStor
 		}
 	}
 	return Snapshot{storeID: expectedStoreID, revision: revision, components: components}, nil
+}
+
+// NewComponentChange assigns creation-time identity and filename while leaving
+// the accepted snapshot untouched. Existing pending paths participate in the
+// collision check because all changes form one candidate Architecture.
+func (manager *Manager) NewComponentChange(base Snapshot, changes []ComponentChange, title, description string) ComponentChange {
+	used := make(map[string]struct{}, len(base.components)+len(changes))
+	for _, component := range base.components {
+		used[component.path] = struct{}{}
+	}
+	for _, change := range changes {
+		used[change.Path] = struct{}{}
+	}
+	slug := componentFilenameSlug(title)
+	path := "components/" + slug + ".md"
+	for suffix := 2; ; suffix++ {
+		if _, exists := used[path]; !exists {
+			break
+		}
+		path = fmt.Sprintf("components/%s-%d.md", slug, suffix)
+	}
+	return ComponentChange{
+		ID:          uuid.NewString(),
+		Title:       title,
+		Description: description,
+		Path:        path,
+		New:         true,
+	}
+}
+
+func componentFilenameSlug(title string) string {
+	var result strings.Builder
+	separator := false
+	for _, character := range strings.ToLower(strings.TrimSpace(title)) {
+		switch {
+		case character >= 'a' && character <= 'z', character >= '0' && character <= '9':
+			if separator && result.Len() > 0 {
+				result.WriteByte('-')
+			}
+			separator = false
+			result.WriteRune(character)
+		case unicode.IsLetter(character), unicode.IsDigit(character):
+			if separator && result.Len() > 0 {
+				result.WriteByte('-')
+			}
+			separator = false
+			result.WriteRune(character)
+		default:
+			separator = true
+		}
+	}
+	value := strings.Trim(result.String(), "-")
+	if value == "" {
+		return "component"
+	}
+	return value
+}
+
+// ConstructCandidate is the single I2.2 candidate construction and validation
+// path. It starts from the exact loaded base tree, writes only changed/new
+// blobs, and validates the complete resulting tree through the same loader used
+// for accepted Architecture.
+func (manager *Manager) ConstructCandidate(ctx context.Context, base Snapshot, changes []ComponentChange) (Candidate, error) {
+	storePath, err := manager.StorePath(base.storeID.String())
+	if err != nil {
+		return Candidate{}, err
+	}
+	entries, err := manager.git.treeEntries(ctx, storePath, base.revision)
+	if err != nil {
+		return Candidate{}, fmt.Errorf("construct candidate from accepted base: %w", err)
+	}
+
+	byPath := make(map[string]treeEntry, len(entries))
+	var manifest treeEntry
+	for _, entry := range entries {
+		if entry.Path == "architecture.yaml" {
+			manifest = entry
+		}
+		if entry.Type == "blob" {
+			byPath[entry.Path] = entry
+		}
+	}
+	if manifest.Path == "" {
+		return Candidate{}, fmt.Errorf("%w: architecture identity is missing", ErrInvalid)
+	}
+
+	baseByID := make(map[string]component, len(base.components))
+	for _, component := range base.components {
+		baseByID[component.id.String()] = component
+	}
+	seenIDs := make(map[string]struct{}, len(changes))
+	for _, change := range changes {
+		if _, duplicate := seenIDs[change.ID]; duplicate {
+			return Candidate{}, fmt.Errorf("%w: component is changed more than once", ErrInvalid)
+		}
+		seenIDs[change.ID] = struct{}{}
+		if strings.TrimSpace(change.Title) == "" {
+			return Candidate{}, &ComponentValidationError{ComponentID: change.ID, Err: ErrTitleRequired}
+		}
+		if strings.ContainsAny(change.Title, "\r\n") {
+			return Candidate{}, &ComponentValidationError{ComponentID: change.ID, Err: ErrTitleOneLine}
+		}
+
+		var source []byte
+		mode := "100644"
+		if change.New {
+			if _, exists := baseByID[change.ID]; exists {
+				return Candidate{}, fmt.Errorf("%w: new component identity already exists", ErrInvalid)
+			}
+			if !validNewComponentPath(change.Path) {
+				return Candidate{}, fmt.Errorf("%w: new component path is invalid", ErrInvalid)
+			}
+			if _, exists := byPath[change.Path]; exists {
+				return Candidate{}, fmt.Errorf("%w: new component path already exists", ErrInvalid)
+			}
+			if _, err := uuid.Parse(change.ID); err != nil {
+				return Candidate{}, fmt.Errorf("%w: new component identity is invalid", ErrInvalid)
+			}
+			source = newComponentSource(change)
+		} else {
+			accepted, exists := baseByID[change.ID]
+			if !exists || accepted.path != change.Path {
+				return Candidate{}, fmt.Errorf("%w: changed component does not belong to the accepted base", ErrInvalid)
+			}
+			mode = accepted.mode
+			source = editedComponentSource(accepted, change.Title, change.Description)
+			if bytes.Equal(source, accepted.source) {
+				continue
+			}
+		}
+		blob, err := manager.git.writeBlob(ctx, storePath, source)
+		if err != nil {
+			return Candidate{}, fmt.Errorf("write candidate component: %w", err)
+		}
+		byPath[change.Path] = treeEntry{Mode: mode, Type: "blob", Object: blob, Path: change.Path}
+	}
+
+	componentPaths := make([]string, 0, len(byPath))
+	for path := range byPath {
+		if strings.HasPrefix(path, "components/") {
+			componentPaths = append(componentPaths, path)
+		}
+	}
+	sort.Strings(componentPaths)
+	var componentTree string
+	if len(componentPaths) > 0 {
+		var treeSource strings.Builder
+		for _, path := range componentPaths {
+			entry := byPath[path]
+			fmt.Fprintf(&treeSource, "%s blob %s\t%s\n", entry.Mode, entry.Object, strings.TrimPrefix(path, "components/"))
+		}
+		componentTree, err = manager.git.makeTree(ctx, storePath, []byte(treeSource.String()))
+		if err != nil {
+			return Candidate{}, fmt.Errorf("construct candidate component tree: %w", err)
+		}
+	}
+	rootSource := fmt.Sprintf("%s blob %s\tarchitecture.yaml\n", manifest.Mode, manifest.Object)
+	if componentTree != "" {
+		rootSource += "040000 tree " + componentTree + "\tcomponents\n"
+	}
+	tree, err := manager.git.makeTree(ctx, storePath, []byte(rootSource))
+	if err != nil {
+		return Candidate{}, fmt.Errorf("construct candidate tree: %w", err)
+	}
+	snapshot, err := manager.load(ctx, storePath, base.storeID, tree)
+	if err != nil {
+		return Candidate{}, err
+	}
+	return Candidate{tree: tree, snapshot: snapshot}, nil
+}
+
+func validNewComponentPath(path string) bool {
+	if !strings.HasPrefix(path, "components/") || !strings.HasSuffix(path, ".md") {
+		return false
+	}
+	relative := strings.TrimPrefix(path, "components/")
+	return relative != "" && !strings.Contains(relative, "/")
+}
+
+func newComponentSource(change ComponentChange) []byte {
+	return []byte(fmt.Sprintf("---\nid: %q\n---\n# %s\n%s", change.ID, escapeMarkdownTitle(change.Title), change.Description))
+}
+
+func editedComponentSource(accepted component, title, description string) []byte {
+	heading := accepted.source[accepted.headingStart:accepted.headingEnd]
+	if title != accepted.title {
+		heading = replacementHeading(accepted, title)
+	}
+	body := accepted.body
+	if description != string(accepted.body) {
+		body = []byte(description)
+	}
+	source := make([]byte, 0, len(accepted.source)+len(title)+len(description))
+	source = append(source, accepted.source[:accepted.headingStart]...)
+	source = append(source, heading...)
+	source = append(source, body...)
+	return source
+}
+
+func replacementHeading(accepted component, title string) []byte {
+	lineEnding := headingLineEnding(accepted.source[accepted.headingStart:accepted.headingEnd])
+	escaped := escapeMarkdownTitle(title)
+	if accepted.headingStyle == headingSetext {
+		return []byte(escaped + lineEnding + "=" + lineEnding)
+	}
+	return []byte("# " + escaped + lineEnding)
+}
+
+func headingLineEnding(block []byte) string {
+	if bytes.Contains(block, []byte("\r\n")) {
+		return "\r\n"
+	}
+	if bytes.Contains(block, []byte("\n")) {
+		return "\n"
+	}
+	return "\n"
+}
+
+func escapeMarkdownTitle(title string) string {
+	var escaped strings.Builder
+	for _, character := range title {
+		if strings.ContainsRune(`\\`+"`*_{}[]<>()#+-.!|", character) {
+			escaped.WriteByte('\\')
+		}
+		escaped.WriteRune(character)
+	}
+	return escaped.String()
 }
 
 type componentFrontmatter struct {
@@ -382,7 +697,21 @@ func parseComponent(path string, contents []byte) (component, error) {
 		relationships[index] = componentRelationship{target: target, label: relationship.Label}
 	}
 	body := append([]byte(nil), markdownSource[bodyStart:]...)
-	return component{id: componentID, path: path, title: title, body: body, relationships: relationships}, nil
+	headingStart, style, err := headingBlockStart(markdownSource, heading)
+	if err != nil {
+		return component{}, err
+	}
+	markdownStart := len(contents) - len(markdownSource)
+	return component{
+		id:            componentID,
+		path:          path,
+		title:         title,
+		body:          body,
+		relationships: relationships,
+		headingStart:  markdownStart + headingStart,
+		headingEnd:    markdownStart + bodyStart,
+		headingStyle:  style,
+	}, nil
 }
 
 func splitComponentFrontmatter(contents []byte) ([]byte, []byte, error) {
@@ -553,6 +882,21 @@ func headingBlockEnd(source []byte, heading *ast.Heading) (int, error) {
 		return 0, errors.New("Setext level-one heading is incomplete")
 	}
 	return underlineEnd, nil
+}
+
+func headingBlockStart(source []byte, heading *ast.Heading) (int, headingStyle, error) {
+	lines := heading.Lines()
+	if lines == nil || lines.Len() == 0 {
+		return 0, headingATX, errors.New("level-one heading has no source location")
+	}
+	first := lines.At(0)
+	lineStart := bytes.LastIndexByte(source[:first.Start], '\n') + 1
+	lineEnd := endOfSourceLine(source, first.Stop)
+	line := bytes.TrimLeft(source[lineStart:lineEnd], " \t")
+	if (len(line) == 1 && line[0] == '#') || (len(line) > 1 && line[0] == '#' && (line[1] == ' ' || line[1] == '\t' || line[1] == '\r' || line[1] == '\n')) {
+		return lineStart, headingATX, nil
+	}
+	return lineStart, headingSetext, nil
 }
 
 func endOfSourceLine(source []byte, offset int) int {

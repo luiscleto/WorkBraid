@@ -13,6 +13,30 @@ type ArchitectureResult = {
   revision: string
   component_count: number
   component_titles: string[]
+  components: AuthoringComponent[]
+  changes?: ChangesInProgress
+}
+
+type AuthoringComponent = {
+  id: string
+  title: string
+  description: string
+}
+
+type PendingComponent = AuthoringComponent & { new: boolean }
+
+type ChangesInProgress = {
+  components: PendingComponent[]
+  valid: boolean
+  validation_code?: string
+  validation_item?: string
+}
+
+type ComponentEditor = {
+  kind: 'add' | 'edit'
+  id?: string
+  title: string
+  description: string
 }
 
 type ErrorCode =
@@ -43,6 +67,8 @@ type ViewState =
 export function App() {
   const [sourceRoot, setSourceRoot] = useState('')
   const [state, setState] = useState<ViewState>({ kind: 'idle' })
+  const [editor, setEditor] = useState<ComponentEditor | null>(null)
+  const [authoringError, setAuthoringError] = useState('')
 
   async function inspectProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -63,12 +89,61 @@ export function App() {
         return
       }
       if ('state' in result) {
+        setEditor(null)
+        setAuthoringError('')
         setState({ kind: 'ready', value: result as ArchitectureResult })
       } else {
         setState({ kind: 'inspection', value: result as Inspection })
       }
     } catch {
       setState({ kind: 'path-error', message: messageForError() })
+    }
+  }
+
+  function editAccepted(component: AuthoringComponent, result: ArchitectureResult) {
+    const pending = result.changes?.components.find((change) => change.id === component.id)
+    setAuthoringError('')
+    setEditor({
+      kind: 'edit',
+      id: component.id,
+      title: pending?.title ?? component.title,
+      description: pending?.description ?? component.description,
+    })
+  }
+
+  function editPending(component: PendingComponent) {
+    setAuthoringError('')
+    setEditor({ kind: 'edit', id: component.id, title: component.title, description: component.description })
+  }
+
+  async function submitComponent(event: FormEvent<HTMLFormElement>, result: ArchitectureResult) {
+    event.preventDefault()
+    if (!editor) return
+    setAuthoringError('')
+    const endpoint = editor.kind === 'add' ? '/api/architecture/components/add' : '/api/architecture/components/edit'
+    try {
+      const response = await postJSON(endpoint, {
+        source_root: result.source_root,
+        ...(editor.id ? { component_id: editor.id } : {}),
+        title: editor.title,
+        description: editor.description,
+      })
+      const payload = (await response.json()) as ArchitectureResult | ErrorPayload
+      if (!response.ok || !('state' in payload)) {
+        setAuthoringError(messageForAuthoringError('code' in payload ? payload.code : undefined))
+        return
+      }
+      setState({ kind: 'ready', value: payload })
+      if (payload.changes?.valid) {
+        setEditor(null)
+      } else {
+        const invalid = payload.changes?.components.find((change) => change.id === payload.changes?.validation_item)
+        if (invalid) {
+          setEditor({ kind: 'edit', id: invalid.id, title: invalid.title, description: invalid.description })
+        }
+      }
+    } catch {
+      setAuthoringError("WorkBraid couldn't keep that change. Try again.")
     }
   }
 
@@ -115,6 +190,8 @@ export function App() {
               onChange={(event) => {
                 setSourceRoot(event.target.value)
                 setState({ kind: 'idle' })
+                setEditor(null)
+                setAuthoringError('')
               }}
               placeholder="/home/alice/src/example-project"
               autoComplete="off"
@@ -171,17 +248,82 @@ export function App() {
                 {state.value.component_count === 0 ? (
                   <p>This project has an empty architecture.</p>
                 ) : (
-                  <div className="component-inventory">
+                  <div className="component-inventory accepted-components">
                     <p>
                       This architecture has {state.value.component_count}{' '}
                       {state.value.component_count === 1 ? 'component' : 'components'}.
                     </p>
                     <ul>
-                      {state.value.component_titles.map((title, index) => (
-                        <li key={`${index}-${title}`}>{title}</li>
+                      {(state.value.components ?? []).map((component) => (
+                        <li key={component.id}>
+                          <span>{component.title}</span>
+                          <button className="text-action" type="button" onClick={() => editAccepted(component, state.value)}>
+                            Edit
+                          </button>
+                        </li>
                       ))}
                     </ul>
                   </div>
+                )}
+                <div className="authoring-actions">
+                  <button
+                    className="inline-action"
+                    type="button"
+                    onClick={() => {
+                      setAuthoringError('')
+                      setEditor({ kind: 'add', title: '', description: '' })
+                    }}
+                  >
+                    Add component
+                  </button>
+                </div>
+                {state.value.changes && state.value.changes.components.length > 0 && (
+                  <section className="changes-in-progress" aria-labelledby="changes-heading">
+                    <h3 id="changes-heading">Changes in progress</h3>
+                    <p>These changes have not updated the architecture yet.</p>
+                    <ul>
+                      {state.value.changes.components.map((component) => (
+                        <li key={component.id}>
+                          <span>{component.title.trim() || 'Untitled component'}</span>
+                          <button className="text-action" type="button" onClick={() => editPending(component)}>
+                            Edit
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+                {editor && (
+                  <form className="component-form" onSubmit={(event) => submitComponent(event, state.value)}>
+                    <h3>{editor.kind === 'add' ? 'Add component' : 'Edit component'}</h3>
+                    <label htmlFor="component-title">Title</label>
+                    <input
+                      id="component-title"
+                      value={editor.title}
+                      onChange={(event) => setEditor({ ...editor, title: event.target.value })}
+                      autoComplete="off"
+                    />
+                    <label htmlFor="component-description">Description</label>
+                    <textarea
+                      id="component-description"
+                      value={editor.description}
+                      onChange={(event) => setEditor({ ...editor, description: event.target.value })}
+                      rows={8}
+                    />
+                    {(authoringError || validationMessage(state.value.changes, editor.id)) && (
+                      <p className="authoring-error" role="alert">
+                        {authoringError || validationMessage(state.value.changes, editor.id)}
+                      </p>
+                    )}
+                    <div className="button-group">
+                      <button className="secondary-action" type="button" onClick={() => setEditor(null)}>
+                        Cancel
+                      </button>
+                      <button className="inline-action" type="submit">
+                        Keep change
+                      </button>
+                    </div>
+                  </form>
                 )}
                 <FolderPath path={state.value.source_root} />
                 <details>
@@ -307,4 +449,20 @@ function messageForError(code?: string) {
     return errorMessages[code as ErrorCode]
   }
   return errorMessages.lookup_failed
+}
+
+function validationMessage(changes?: ChangesInProgress, componentID?: string) {
+  if (!changes || changes.valid || !componentID || changes.validation_item !== componentID) return ''
+  if (changes.validation_code === 'title_required') return 'Add a title.'
+  if (changes.validation_code === 'title_one_line') return 'Use a one-line title.'
+  if (changes.validation_code === 'change_unavailable') return "WorkBraid couldn't check these changes. Try again."
+  return 'Check this component and try again.'
+}
+
+function messageForAuthoringError(code?: string) {
+  if (code === 'origin_mismatch') return 'Open WorkBraid at the address printed in the terminal.'
+  if (code === 'changes_elsewhere') return 'Changes are already in progress for another architecture.'
+  if (code === 'component_not_found') return 'That component is no longer available to edit.'
+  if (code === 'architecture_not_open') return 'Open the project again, then try your change.'
+  return "WorkBraid couldn't keep that change. Try again."
 }

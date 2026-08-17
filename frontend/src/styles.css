@@ -34,7 +34,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -243,8 +244,116 @@ button:disabled {
 }
 
 .component-inventory li {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 18px;
   border-bottom: 1px solid var(--hairline);
   padding: 9px 0;
+}
+
+.text-action {
+	width: auto;
+	min-width: 0;
+	border: 0;
+	padding: 4px 0;
+	color: var(--accent);
+	background: transparent;
+	font-size: 0.7rem;
+}
+
+.text-action:hover:not(:disabled) {
+	color: #24482f;
+	background: transparent;
+}
+
+.authoring-actions {
+	margin-bottom: 28px;
+}
+
+.changes-in-progress {
+	margin: 28px 0;
+	padding-top: 24px;
+	border-top: 1px solid var(--hairline);
+}
+
+.changes-in-progress h3,
+.component-form h3 {
+	margin: 0 0 8px;
+	font-family: "Newsreader Variable", serif;
+	font-size: 1.55rem;
+	font-weight: 520;
+}
+
+.changes-in-progress > p {
+	margin: 0 0 14px;
+	color: var(--muted-ink);
+}
+
+.changes-in-progress ul {
+	margin: 0;
+	border-top: 1px solid var(--hairline);
+	padding: 0;
+	list-style: none;
+}
+
+.changes-in-progress li {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 18px;
+	border-bottom: 1px solid var(--hairline);
+	padding: 9px 0;
+}
+
+.component-form {
+	margin: 30px 0;
+	border: 0;
+	border-top: 1px solid var(--ink);
+	padding: 24px 0 4px;
+}
+
+.component-form label {
+	margin-top: 18px;
+}
+
+.component-form input,
+.component-form textarea {
+	display: block;
+	width: 100%;
+	border: 1px solid var(--ink);
+	padding: 12px 14px;
+	color: var(--ink);
+	background: rgb(255 252 232 / 34%);
+	font-family: "IBM Plex Sans", sans-serif;
+	font-size: 1rem;
+	line-height: 1.5;
+}
+
+.component-form textarea {
+	resize: vertical;
+	font-family: "IBM Plex Mono", monospace;
+	font-size: 0.9rem;
+}
+
+.component-form input:focus,
+.component-form textarea:focus {
+	border-color: var(--accent);
+	outline: 3px solid rgb(49 91 61 / 18%);
+	outline-offset: -3px;
+}
+
+.component-form .button-group {
+	margin-top: 22px;
+}
+
+.component-form .button-group button {
+	margin-top: 0;
+}
+
+.authoring-error {
+	margin: 12px 0 0;
+	font-weight: 600;
 }
 
 .project-name {

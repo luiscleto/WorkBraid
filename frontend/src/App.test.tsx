@@ -102,19 +102,126 @@ describe('App', () => {
       revision,
       component_count: 3,
       component_titles: ['API', 'Worker', 'API'],
+      components: [
+        { id: 'api-1', title: 'API', description: '\nAPI body\n' },
+        { id: 'worker', title: 'Worker', description: 'Worker body\n' },
+        { id: 'api-2', title: 'API', description: '' },
+      ],
     }])
     render(<App />)
     await submitPath('/tmp/example')
 
     expect(await screen.findByRole('heading', { name: 'Architecture ready' })).toBeInTheDocument()
     expect(screen.getByText('This architecture has 3 components.')).toBeInTheDocument()
-    expect(screen.getAllByRole('listitem').map((item) => item.textContent)).toEqual(['API', 'Worker', 'API'])
+    expect(screen.getAllByRole('listitem').map((item) => item.querySelector('span')?.textContent)).toEqual(['API', 'Worker', 'API'])
     expect(screen.queryByText('This project has an empty architecture.')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /create|edit|relationship|map|repair/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add component' })).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Edit' })).toHaveLength(3)
+    expect(screen.queryByRole('button', { name: /relationship|map|repair/i })).not.toBeInTheDocument()
     expect(screen.queryByText(/markdown|frontmatter|uuid|filename|relationship/i)).not.toBeInTheDocument()
     const details = screen.getByText('Technical details').closest('details')
     expect(details).not.toHaveAttribute('open')
     expect(within(details as HTMLElement).getByText(revision)).toBeInTheDocument()
+  })
+
+  it('keeps accepted components separate while one edit and one addition accumulate as changes in progress', async () => {
+    const accepted = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: 'f'.repeat(40),
+      component_count: 1, component_titles: ['API'],
+      components: [{ id: 'api-id', title: 'API', description: '\nAccepted body\n' }],
+    }
+    const edited = {
+      ...accepted,
+      changes: {
+        valid: true,
+        components: [{ id: 'api-id', title: 'Gateway', description: '\nChanged body\n', new: false }],
+      },
+    }
+    const both = {
+      ...accepted,
+      changes: {
+        valid: true,
+        components: [
+          ...edited.changes.components,
+          { id: 'worker-id', title: 'Worker', description: '\nDoes work\n', new: true },
+        ],
+      },
+    }
+    const fetchMock = mockResponses([accepted, edited, both])
+    render(<App />)
+    await submitPath('/tmp/example')
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+    await user.clear(screen.getByLabelText('Title'))
+    await user.type(screen.getByLabelText('Title'), 'Gateway')
+    await user.clear(screen.getByLabelText('Description'))
+    await user.type(screen.getByLabelText('Description'), '\nChanged body\n')
+    await user.click(screen.getByRole('button', { name: 'Keep change' }))
+
+    expect(await screen.findByRole('heading', { name: 'Changes in progress' })).toBeInTheDocument()
+    expect(screen.getByText('These changes have not updated the architecture yet.')).toBeInTheDocument()
+    expect(screen.getByText('API')).toBeInTheDocument()
+    expect(screen.getByText('Gateway')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Add component' }))
+    await user.type(screen.getByLabelText('Title'), 'Worker')
+    await user.type(screen.getByLabelText('Description'), '\nDoes work\n')
+    await user.click(screen.getByRole('button', { name: 'Keep change' }))
+
+    expect(await screen.findByText('Worker')).toBeInTheDocument()
+    expect(screen.getAllByRole('listitem')).toHaveLength(3)
+    expect(requestPath(fetchMock, 1)).toBe('/api/architecture/components/edit')
+    expect(requestBody(fetchMock, 1)).toEqual({
+      source_root: '/tmp/example', component_id: 'api-id', title: 'Gateway', description: '\nChanged body\n',
+    })
+    expect(requestPath(fetchMock, 2)).toBe('/api/architecture/components/add')
+  })
+
+  it('retrieves invalid backend-held changes after a browser reload and keeps them correctable', async () => {
+    const accepted = {
+      source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: '1'.repeat(40),
+      component_count: 0, component_titles: [], components: [],
+    }
+    const invalid = {
+      ...accepted,
+      changes: {
+        valid: false,
+        validation_code: 'title_required',
+        validation_item: 'new-id',
+        components: [{ id: 'new-id', title: '   ', description: 'Useful description', new: true }],
+      },
+    }
+    const corrected = {
+      ...accepted,
+      changes: {
+        valid: true,
+        components: [{ id: 'new-id', title: 'Worker', description: 'Useful description', new: true }],
+      },
+    }
+    mockResponses([accepted, invalid, invalid, corrected])
+    const first = render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Add component' }))
+    await user.type(screen.getByLabelText('Title'), '   ')
+    await user.type(screen.getByLabelText('Description'), 'Useful description')
+    await user.click(screen.getByRole('button', { name: 'Keep change' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Add a title.')
+    expect(screen.getByText('Untitled component')).toBeInTheDocument()
+
+    first.unmount()
+    render(<App />)
+    await submitPath('/tmp/example')
+    expect(await screen.findByRole('heading', { name: 'Changes in progress' })).toBeInTheDocument()
+    expect(screen.getByText('Untitled component')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('Add a title.')
+    await user.clear(screen.getByLabelText('Title'))
+    await user.type(screen.getByLabelText('Title'), 'Worker')
+    await user.click(screen.getByRole('button', { name: 'Keep change' }))
+    expect(await screen.findByText('Worker')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it.each([
