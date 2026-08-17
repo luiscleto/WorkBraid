@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -318,6 +319,7 @@ func (h *Handler) decodeComponentMutation(response http.ResponseWriter, request 
 }
 
 func (h *Handler) mutateComponent(response http.ResponseWriter, request *http.Request, payload componentMutationRequest, add bool) {
+	payload.Title = strings.TrimSpace(payload.Title)
 	h.stateMutex.Lock()
 	defer h.stateMutex.Unlock()
 	if h.loadedSnapshot == nil || h.loadedProject == nil || payload.SourceRoot != h.loadedProject.sourceRoot {

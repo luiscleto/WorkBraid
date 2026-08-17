@@ -189,7 +189,7 @@ describe('App', () => {
         valid: false,
         validation_code: 'title_required',
         validation_item: 'new-id',
-        components: [{ id: 'new-id', title: '   ', description: 'Useful description', new: true }],
+        components: [{ id: 'new-id', title: '', description: 'Useful description', new: true }],
       },
     }
     const corrected = {

@@ -736,6 +736,9 @@ func plainHeadingText(heading *ast.Heading, source []byte) ([]byte, error) {
 		case *ast.AutoLink:
 			result.Write(value.Label(source))
 			return ast.WalkSkipChildren, nil
+		case *ast.RawHTML:
+			result.Write(value.Segments.Value(source))
+			return ast.WalkSkipChildren, nil
 		case *ast.Text:
 			result.Write(resolveMarkdownText(value.Value(source)))
 		case *ast.String:

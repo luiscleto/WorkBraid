@@ -48,14 +48,14 @@ func TestPendingComponentAuthoringUsesOneBackendCandidateAndLeavesAcceptedUnchan
 	reachableBefore := runGit(t, dataDirectory, "--git-dir", storePath, "rev-list", "--objects", "--all")
 
 	edited := postComponentMutation(t, handler, testOrigin, "/api/architecture/components/edit", componentMutationRequest{
-		SourceRoot: filepath.Clean(source), ComponentID: apiID, Title: "Gateway", Description: "\nChanged API body\n",
+		SourceRoot: filepath.Clean(source), ComponentID: apiID, Title: "  Gateway  ", Description: "\nChanged API body\n",
 	})
 	editedBody := decodeArchitectureResponse(t, edited)
-	if edited.Code != http.StatusOK || editedBody.Changes == nil || !editedBody.Changes.Valid || len(editedBody.Changes.Components) != 1 {
+	if edited.Code != http.StatusOK || editedBody.Changes == nil || !editedBody.Changes.Valid || len(editedBody.Changes.Components) != 1 || editedBody.Changes.Components[0].Title != "Gateway" {
 		t.Fatalf("edit response status=%d body=%s", edited.Code, edited.Body.String())
 	}
 	added := postComponentMutation(t, handler, testOrigin, "/api/architecture/components/add", componentMutationRequest{
-		SourceRoot: filepath.Clean(source), Title: "API", Description: "\nNew API body\n",
+		SourceRoot: filepath.Clean(source), Title: "  API  ", Description: "\nNew API body\n",
 	})
 	addedBody := decodeArchitectureResponse(t, added)
 	if added.Code != http.StatusOK || addedBody.Changes == nil || !addedBody.Changes.Valid || len(addedBody.Changes.Components) != 2 {
@@ -65,6 +65,9 @@ func TestPendingComponentAuthoringUsesOneBackendCandidateAndLeavesAcceptedUnchan
 	for _, change := range addedBody.Changes.Components {
 		if change.New {
 			newID = change.ID
+			if change.Title != "API" {
+				t.Fatalf("new pending title = %q, want normalized API", change.Title)
+			}
 		}
 	}
 	if _, err := uuid.Parse(newID); err != nil {
@@ -78,6 +81,11 @@ func TestPendingComponentAuthoringUsesOneBackendCandidateAndLeavesAcceptedUnchan
 	if invalid.Code != http.StatusOK || invalidBody.Changes == nil || invalidBody.Changes.Valid || invalidBody.Changes.ValidationCode != "title_required" || invalidBody.Changes.ValidationItem != newID || len(invalidBody.Changes.Components) != 2 {
 		t.Fatalf("invalid response status=%d body=%s", invalid.Code, invalid.Body.String())
 	}
+	for _, change := range invalidBody.Changes.Components {
+		if change.ID == newID && change.Title != "" {
+			t.Fatalf("invalid pending title = %q, want normalized empty title", change.Title)
+		}
+	}
 
 	// Reopening through a fresh HTTP request against the same handler models a
 	// browser reload without granting cross-process persistence.
@@ -86,11 +94,16 @@ func TestPendingComponentAuthoringUsesOneBackendCandidateAndLeavesAcceptedUnchan
 		t.Fatalf("same-process reload lost pending state: %+v", reloaded.Changes)
 	}
 	corrected := postComponentMutation(t, handler, testOrigin, "/api/architecture/components/edit", componentMutationRequest{
-		SourceRoot: filepath.Clean(source), ComponentID: newID, Title: "API helper", Description: "\nNew API body\n",
+		SourceRoot: filepath.Clean(source), ComponentID: newID, Title: "  API helper  ", Description: "\nNew API body\n",
 	})
 	correctedBody := decodeArchitectureResponse(t, corrected)
 	if correctedBody.Changes == nil || !correctedBody.Changes.Valid || len(correctedBody.Changes.Components) != 2 {
 		t.Fatalf("corrected response = %s", corrected.Body.String())
+	}
+	for _, change := range correctedBody.Changes.Components {
+		if change.ID == newID && change.Title != "API helper" {
+			t.Fatalf("corrected pending title = %q, want normalized API helper", change.Title)
+		}
 	}
 	if correctedBody.Revision != accepted || strings.Join(correctedBody.ComponentTitles, "|") != "API|Worker" {
 		t.Fatalf("accepted response advanced during authoring: %+v", correctedBody)
