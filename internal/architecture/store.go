@@ -18,6 +18,7 @@ import (
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 	"go.yaml.in/yaml/v4"
 )
 
@@ -629,7 +630,11 @@ func headingLineEnding(block []byte) string {
 func escapeMarkdownTitle(title string) string {
 	var escaped strings.Builder
 	for _, character := range title {
-		if strings.ContainsRune(`\\`+"`*_{}[]<>()#+-.!|", character) {
+		if character == '&' {
+			escaped.WriteString("&amp;")
+			continue
+		}
+		if character < utf8.RuneSelf && util.IsPunct(byte(character)) {
 			escaped.WriteByte('\\')
 		}
 		escaped.WriteRune(character)
@@ -679,7 +684,11 @@ func parseComponent(path string, contents []byte) (component, error) {
 	if !ok || heading.Level != 1 {
 		return component{}, errors.New("first Markdown block must be a level-one heading")
 	}
-	title := strings.TrimSpace(string(heading.Text(markdownSource)))
+	titleBytes, err := plainHeadingText(heading, markdownSource)
+	if err != nil {
+		return component{}, err
+	}
+	title := strings.TrimSpace(string(titleBytes))
 	if title == "" {
 		return component{}, errors.New("level-one heading title is empty")
 	}
@@ -712,6 +721,42 @@ func parseComponent(path string, contents []byte) (component, error) {
 		headingEnd:    markdownStart + bodyStart,
 		headingStyle:  style,
 	}, nil
+}
+
+func plainHeadingText(heading *ast.Heading, source []byte) ([]byte, error) {
+	var result bytes.Buffer
+	err := ast.Walk(heading, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch value := node.(type) {
+		case *ast.CodeSpan:
+			result.Write(value.Text(source))
+			return ast.WalkSkipChildren, nil
+		case *ast.AutoLink:
+			result.Write(value.Label(source))
+			return ast.WalkSkipChildren, nil
+		case *ast.Text:
+			result.Write(resolveMarkdownText(value.Value(source)))
+		case *ast.String:
+			if value.IsCode() || value.IsRaw() {
+				result.Write(value.Value)
+			} else {
+				result.Write(resolveMarkdownText(value.Value))
+			}
+		}
+		return ast.WalkContinue, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read level-one heading title: %w", err)
+	}
+	return result.Bytes(), nil
+}
+
+func resolveMarkdownText(source []byte) []byte {
+	value := util.UnescapePunctuations(source)
+	value = util.ResolveNumericReferences(value)
+	return util.ResolveEntityNames(value)
 }
 
 func splitComponentFrontmatter(contents []byte) ([]byte, []byte, error) {

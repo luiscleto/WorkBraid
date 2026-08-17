@@ -427,6 +427,60 @@ func TestConstructCandidateAddsMultipleComponentsWithStableCreationPaths(t *test
 	}
 }
 
+func TestStructuredPlainTitlesRoundTripThroughRealCandidateParsing(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	storeID := uuid.NewString()
+	bootstrap, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath, _ := manager.StorePath(storeID)
+	manifest := gitBytes(t, "--git-dir", storePath, "show", bootstrap.Revision()+":architecture.yaml")
+	atxID := uuid.NewString()
+	setextID := uuid.NewString()
+	atx := []byte("---\nid: \"" + atxID + "\"\n---\n# Old ATX\nATX body\n")
+	setext := []byte("---\nid: \"" + setextID + "\"\n---\nOld Setext\n==========\nSetext body\n")
+	componentTree := mktree(t, storePath,
+		"100644 blob "+writeTestBlob(t, storePath, atx)+"\tatx.md\n"+
+			"100644 blob "+writeTestBlob(t, storePath, setext)+"\tsetext.md\n")
+	accepted := commitManifestTree(t, storePath, manifest, "100644", []string{"040000 tree " + componentTree + "\tcomponents"})
+	gitText(t, "--git-dir", storePath, "update-ref", acceptedRef, accepted, bootstrap.Revision())
+	base, err := manager.LoadAccepted(context.Background(), storeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, title := range []string{
+		"~~Retired~~",
+		"*literal*",
+		"<https://example.invalid>",
+		"a | b",
+		"A &amp; B",
+		"`code` and [brackets]",
+	} {
+		t.Run(title, func(t *testing.T) {
+			created := manager.NewComponentChange(base, nil, title, "New body\n")
+			candidate, err := manager.ConstructCandidate(context.Background(), base, []ComponentChange{
+				{ID: atxID, Path: "components/atx.md", Title: title, Description: "ATX body\n"},
+				{ID: setextID, Path: "components/setext.md", Title: title, Description: "Setext body\n"},
+				created,
+			})
+			if err != nil {
+				t.Fatalf("construct candidate: %v", err)
+			}
+			got := make(map[string]string)
+			for _, component := range candidate.Snapshot().AuthoringComponents() {
+				got[component.ID] = component.Title
+			}
+			for _, id := range []string{atxID, setextID, created.ID} {
+				if got[id] != title {
+					t.Fatalf("candidate title for %s = %q, want exact structured title %q", id, got[id], title)
+				}
+			}
+		})
+	}
+}
+
 type retainedComponent struct {
 	path          string
 	title         string
