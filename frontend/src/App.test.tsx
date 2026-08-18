@@ -434,6 +434,140 @@ describe('App', () => {
     expect(screen.getByText('Worker body.')).toBeInTheDocument()
   })
 
+  it('authors ordered outgoing relationships with backend-supplied identity choices', async () => {
+    const accepted = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: '7'.repeat(40),
+      component_count: 4, component_titles: ['Gateway', 'Worker', 'Records', 'Records'],
+      components: [
+        { id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Gateway body.\n', relationships: [
+          { target_id: 'worker', label: '  calls: primary  ' },
+          { target_id: 'records-a', label: 'reads from' },
+        ] },
+        { id: 'worker', title: 'Worker', filename: 'worker.md', description: 'Worker body.\n', relationships: [] },
+        { id: 'records-a', title: 'Records', filename: 'records-a.md', description: 'A.\n', relationships: [] },
+        { id: 'records-b', title: 'Records', filename: 'records-b.md', description: 'B.\n', relationships: [] },
+      ],
+      changes: {
+        valid: true,
+        components: [{ id: 'queue', title: 'Queue', description: 'Pending.\n', relationships: [], new: true }],
+        relationship_targets: [
+          { id: 'gateway', title: 'Gateway' },
+          { id: 'worker', title: 'Worker' },
+          { id: 'records-a', title: 'Records', context: 'records-a.md' },
+          { id: 'records-b', title: 'Records', context: 'records-b.md' },
+          { id: 'queue', title: 'Queue', new: true },
+        ],
+      },
+    }
+    const kept = {
+      ...accepted,
+      changes: {
+        ...accepted.changes,
+        components: [
+          ...accepted.changes.components,
+          { id: 'gateway', title: 'Gateway', description: 'Gateway body.\n', new: false, relationships: [
+            { target_id: 'worker', label: '  calls: primary  ' },
+            { target_id: 'queue', label: 'publishes\n events' },
+          ] },
+        ],
+      },
+    }
+    const fetchMock = mockResponses([accepted, kept])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'Gateway' }))
+    await user.click(screen.getByRole('button', { name: 'Edit component' }))
+    const relationships = screen.getByRole('group', { name: 'Outgoing relationships' })
+	expect(within(relationships).getAllByRole('option', { name: 'Queue — New component' })).toHaveLength(2)
+	expect(within(relationships).getAllByRole('option', { name: 'Records — records-a.md' })).toHaveLength(2)
+	expect(within(relationships).getAllByRole('option', { name: 'Records — records-b.md' })).toHaveLength(2)
+	expect(within(relationships).getAllByRole('option', { name: 'Worker' })).toHaveLength(2)
+    expect(within(relationships).queryByText(/gateway\.md|worker\.md/)).not.toBeInTheDocument()
+
+    await user.click(within(relationships).getByRole('button', { name: 'Remove relationship 2' }))
+    await user.click(within(relationships).getByRole('button', { name: 'Add relationship' }))
+    const targets = within(relationships).getAllByLabelText('Target')
+    const labels = within(relationships).getAllByLabelText('Label')
+    await user.selectOptions(targets[1], 'queue')
+    await user.type(labels[1], 'publishes{enter} events')
+    await user.click(screen.getByRole('button', { name: 'Keep change' }))
+
+    expect(requestPath(fetchMock, 1)).toBe('/api/architecture/components/edit')
+    expect(requestBody(fetchMock, 1)).toEqual({
+      source_root: '/tmp/example', component_id: 'gateway', relationships_changed: true,
+      relationships: [
+        { target_id: 'worker', label: '  calls: primary  ' },
+        { target_id: 'queue', label: 'publishes\n events' },
+      ],
+      title_changed: false, description_changed: false,
+    })
+    expect(graphHarness.calls.at(-1)?.elements).toHaveLength(6)
+    expect(graphHarness.calls.at(-1)?.elements).toEqual(expect.arrayContaining([
+      { data: { id: 'gateway', label: 'Gateway' } },
+	  { data: { id: 'projection:gateway:worker:0', source: 'gateway', target: 'worker', label: '  calls: primary  ', distance: 0 } },
+    ]))
+    expect(graphHarness.calls.at(-1)?.elements).not.toEqual(expect.arrayContaining([{ data: expect.objectContaining({ id: 'queue' }) }]))
+  })
+
+  it.each([
+    ['relationship_label_required', 'Add a label to each relationship before updating architecture.'],
+    ['relationship_target_required', 'Choose a component for each relationship before updating architecture.'],
+  ])('makes %s actionable only at review while retaining relationship work', async (code, message) => {
+    const pending = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: '7'.repeat(40),
+      component_count: 1, component_titles: ['Gateway'],
+      components: [{ id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Body.\n', relationships: [] }],
+      changes: {
+        valid: false, validation_code: code, validation_item: 'gateway',
+        components: [{ id: 'gateway', title: 'Gateway', description: 'Body.\n', relationships: [{ target_id: '', label: '' }], new: false }],
+        relationship_targets: [{ id: 'gateway', title: 'Gateway' }],
+      },
+    }
+    const blocked = { ...pending, action_error: 'review_failed', changes: { ...pending.changes, review_blocker: code } }
+    mockResponses([pending, blocked], [200, 422])
+    render(<App />)
+    await submitPath('/tmp/example')
+
+    expect(screen.queryByText(message)).not.toBeInTheDocument()
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Review changes' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(message)
+	expect(screen.getAllByText('Gateway').length).toBeGreaterThan(0)
+    expect(screen.queryByText(/yaml|frontmatter|uuid|candidate|ref/i)).not.toBeInTheDocument()
+  })
+
+  it('guards unsent relationship fields before workbench navigation replaces the editor', async () => {
+    const workspace = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: '9'.repeat(40), component_count: 2,
+      component_titles: ['Gateway', 'Worker'],
+      components: [
+        { id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Accepted.\n', relationships: [] },
+        { id: 'worker', title: 'Worker', filename: 'worker.md', description: 'Works.\n', relationships: [] },
+      ],
+    }
+    mockResponses([workspace])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Edit component' }))
+    await user.click(screen.getByRole('button', { name: 'Add relationship' }))
+    await user.selectOptions(screen.getByLabelText('Target'), 'worker')
+    await user.type(screen.getByLabelText('Label'), 'calls')
+
+    await user.click(screen.getByRole('button', { name: 'Worker' }))
+    expect(screen.getByRole('dialog')).toHaveTextContent('Leave without keeping?')
+    await user.click(screen.getByRole('button', { name: 'Keep editing' }))
+    expect(screen.getByLabelText('Target')).toHaveValue('worker')
+    expect(screen.getByLabelText('Label')).toHaveValue('calls')
+
+    await user.click(screen.getByRole('button', { name: 'Worker' }))
+    await user.click(screen.getByRole('button', { name: 'Leave without keeping' }))
+    expect(await screen.findByRole('heading', { name: 'Worker' })).toBeInTheDocument()
+    expect(screen.queryByDisplayValue('calls')).not.toBeInTheDocument()
+  })
+
   it('requires confirmation and discards the whole backend-held change set through one action', async () => {
     const pending = {
       source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: '8'.repeat(40),

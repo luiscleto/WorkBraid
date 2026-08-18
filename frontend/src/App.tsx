@@ -34,12 +34,23 @@ type PendingComponent = AuthoringComponent & { new: boolean }
 
 type ChangesInProgress = {
   components: PendingComponent[]
+  relationship_targets?: RelationshipTarget[]
   valid: boolean
   validation_code?: string
   validation_item?: string
   review?: ChangeReview
   review_blocker?: string
 }
+
+type RelationshipTarget = {
+  id: string
+  title: string
+  context?: string
+  new?: boolean
+}
+
+type RelationshipValue = { target_id: string; label: string }
+type RelationshipRow = RelationshipValue & { rowKey: string }
 
 type ChangeReview = {
   diff: string
@@ -57,6 +68,8 @@ type ComponentEditor = {
   descriptionChanged: boolean
   initialTitle: string
   initialDescription: string
+  relationships: RelationshipRow[]
+  initialRelationships: RelationshipValue[]
 }
 
 type WorkspaceTask = 'documentation' | 'changes' | 'empty'
@@ -91,6 +104,43 @@ type ViewState =
   | { kind: 'setup-error'; inspection: Inspection; code?: string }
   | { kind: 'architecture-error'; sourceRoot: string; code?: string }
   | { kind: 'path-error'; message: string }
+
+let relationshipRowCounter = 0
+
+function newRelationshipRow(value: RelationshipValue = { target_id: '', label: '' }): RelationshipRow {
+  relationshipRowCounter += 1
+  return { ...value, rowKey: `relationship-row-${relationshipRowCounter}` }
+}
+
+function relationshipRows(values: RelationshipValue[]): RelationshipRow[] {
+  return values.map((value) => newRelationshipRow(value))
+}
+
+function relationshipValues(values: Array<RelationshipValue | RelationshipRow>): RelationshipValue[] {
+  return values.map(({ target_id, label }) => ({ target_id, label }))
+}
+
+function sameRelationships(left: RelationshipValue[], right: RelationshipValue[]) {
+  return left.length === right.length && left.every((value, index) => value.target_id === right[index].target_id && value.label === right[index].label)
+}
+
+function relationshipTargetsFor(result: ArchitectureResult): RelationshipTarget[] {
+  if (result.changes?.relationship_targets) return result.changes.relationship_targets
+  const titleCounts = new Map<string, number>()
+  for (const component of result.components ?? []) {
+    titleCounts.set(component.title, (titleCounts.get(component.title) ?? 0) + 1)
+  }
+  return (result.components ?? []).map((component) => ({
+    id: component.id,
+    title: component.title,
+    ...((titleCounts.get(component.title) ?? 0) > 1 ? { context: component.filename || component.id.slice(0, 8) } : {}),
+  }))
+}
+
+function relationshipTargetLabel(target: RelationshipTarget) {
+  const title = target.title.trim() || 'Untitled component'
+  return [title, target.context, target.new ? 'New component' : ''].filter(Boolean).join(' — ')
+}
 
 export function App() {
   const [sourceRoot, setSourceRoot] = useState('')
@@ -160,6 +210,7 @@ export function App() {
 
   function editAccepted(component: AuthoringComponent, result: ArchitectureResult) {
     const pending = result.changes?.components.find((change) => change.id === component.id)
+    const relationships = pending?.relationships ?? component.relationships ?? []
     setAuthoringError('')
     setEditor({
       kind: 'edit',
@@ -170,15 +221,19 @@ export function App() {
       descriptionChanged: false,
       initialTitle: pending?.title ?? component.title,
       initialDescription: pending?.description ?? component.description,
+      relationships: relationshipRows(relationships),
+      initialRelationships: relationshipValues(relationships),
     })
     setWorkspaceTask('documentation')
   }
 
   function editPending(component: PendingComponent) {
+    const relationships = component.relationships ?? []
     setAuthoringError('')
     setEditor({
       kind: 'edit', id: component.id, title: component.title, description: component.description,
       titleChanged: false, descriptionChanged: false, initialTitle: component.title, initialDescription: component.description,
+      relationships: relationshipRows(relationships), initialRelationships: relationshipValues(relationships),
     })
     setWorkspaceTask('changes')
   }
@@ -188,13 +243,17 @@ export function App() {
     if (!editor) return
     setAuthoringError('')
     const endpoint = editor.kind === 'add' ? '/api/architecture/components/add' : '/api/architecture/components/edit'
+    const relationships = relationshipValues(editor.relationships)
+    const relationshipsChanged = !sameRelationships(relationships, editor.initialRelationships)
     try {
       const response = await postJSON(endpoint, {
         source_root: result.source_root,
         ...(editor.id ? { component_id: editor.id } : {}),
         ...(editor.kind === 'add' || editor.titleChanged ? { title: editor.title } : {}),
         ...(editor.kind === 'add' || editor.descriptionChanged ? { description: editor.description } : {}),
+        ...(editor.kind === 'add' || relationshipsChanged ? { relationships } : {}),
         ...(editor.kind === 'edit' ? { title_changed: editor.titleChanged, description_changed: editor.descriptionChanged } : {}),
+        ...(editor.kind === 'edit' && relationshipsChanged ? { relationships_changed: true } : {}),
       })
       const payload = (await response.json()) as ArchitectureResult | ErrorPayload
       if (!response.ok || !('state' in payload)) {
@@ -276,7 +335,10 @@ export function App() {
 
   const busy = state.kind === 'looking' || state.kind === 'setting-up'
 
-  const editorDirty = editor !== null && (editor.title !== editor.initialTitle || editor.description !== editor.initialDescription)
+  const editorDirty = editor !== null && (
+    editor.title !== editor.initialTitle || editor.description !== editor.initialDescription ||
+    !sameRelationships(relationshipValues(editor.relationships), editor.initialRelationships)
+  )
 
   function requestNavigation(intent: NavigationIntent) {
     if (editorDirty) {
@@ -304,6 +366,7 @@ export function App() {
       setEditor({
         kind: 'add', title: '', description: '', titleChanged: false, descriptionChanged: false,
         initialTitle: '', initialDescription: '',
+        relationships: [], initialRelationships: [],
       })
       return
     }
@@ -421,6 +484,7 @@ export function App() {
               <ComponentEditorForm
                 editor={editor}
                 setEditor={setEditor}
+                targets={relationshipTargetsFor(result)}
                 error={authoringError}
                 onCancel={() => setEditor(null)}
                 onSubmit={(event) => submitComponent(event, result)}
@@ -458,7 +522,7 @@ export function App() {
           <div className="navigation-guard" role="dialog" aria-modal="true" aria-labelledby="unsaved-heading">
             <div>
               <h2 id="unsaved-heading">Leave without keeping?</h2>
-              <p>Your latest Title or Description edits have not been kept.</p>
+              <p>Your latest component edits have not been kept.</p>
               <div className="button-group">
                 <button className="secondary-action" type="button" onClick={() => setNavigationIntent(null)}>Keep editing</button>
                 <button className="destructive-action" type="button" onClick={() => performNavigation(navigationIntent)}>Leave without keeping</button>
@@ -558,12 +622,14 @@ export function App() {
 function ComponentEditorForm({
   editor,
   setEditor,
+  targets,
   error,
   onCancel,
   onSubmit,
 }: {
   editor: ComponentEditor
   setEditor: (editor: ComponentEditor) => void
+  targets: RelationshipTarget[]
   error: string
   onCancel: () => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
@@ -585,6 +651,51 @@ function ComponentEditorForm({
         onChange={(event) => setEditor({ ...editor, description: event.target.value, descriptionChanged: true })}
         rows={14}
       />
+      <fieldset className="relationship-editor">
+        <legend>Outgoing relationships</legend>
+        {editor.relationships.length ? (
+          <div className="relationship-rows">
+            {editor.relationships.map((relationship, index) => (
+              <div className="relationship-row" key={relationship.rowKey}>
+                <label htmlFor={`relationship-target-${relationship.rowKey}`}>Target</label>
+                <select
+                  id={`relationship-target-${relationship.rowKey}`}
+                  value={relationship.target_id}
+                  onChange={(event) => setEditor({
+                    ...editor,
+                    relationships: editor.relationships.map((row) => row.rowKey === relationship.rowKey ? { ...row, target_id: event.target.value } : row),
+                  })}
+                >
+                  <option value="">Choose a component</option>
+                  {targets.map((target) => <option key={target.id} value={target.id}>{relationshipTargetLabel(target)}</option>)}
+                </select>
+                <label htmlFor={`relationship-label-${relationship.rowKey}`}>Label</label>
+                <textarea
+                  id={`relationship-label-${relationship.rowKey}`}
+                  value={relationship.label}
+                  rows={2}
+                  placeholder="calls"
+                  onChange={(event) => setEditor({
+                    ...editor,
+                    relationships: editor.relationships.map((row) => row.rowKey === relationship.rowKey ? { ...row, label: event.target.value } : row),
+                  })}
+                />
+                <button
+                  className="text-action relationship-remove"
+                  type="button"
+                  aria-label={`Remove relationship ${index + 1}`}
+                  onClick={() => setEditor({ ...editor, relationships: editor.relationships.filter((row) => row.rowKey !== relationship.rowKey) })}
+                >Remove</button>
+              </div>
+            ))}
+          </div>
+        ) : <p className="relationship-empty">No outgoing relationships</p>}
+        <button
+          className="secondary-action relationship-add"
+          type="button"
+          onClick={() => setEditor({ ...editor, relationships: [...editor.relationships, newRelationshipRow()] })}
+        >Add relationship</button>
+      </fieldset>
       {error && <p className="authoring-error" role="alert">{error}</p>}
       <div className="button-group">
         <button className="secondary-action" type="button" onClick={onCancel}>Cancel</button>
@@ -795,6 +906,8 @@ function messageForAuthoringError(code?: string) {
 function messageForReviewBlocker(code?: string) {
   if (code === 'title_required') return 'Add a title to the untitled component before updating architecture.'
   if (code === 'title_one_line') return 'Use a one-line component title before updating architecture.'
+  if (code === 'relationship_label_required') return 'Add a label to each relationship before updating architecture.'
+  if (code === 'relationship_target_required') return 'Choose a component for each relationship before updating architecture.'
   return 'Correct the component changes before updating architecture.'
 }
 

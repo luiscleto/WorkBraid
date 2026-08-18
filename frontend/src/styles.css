@@ -323,7 +323,8 @@ button:disabled {
 }
 
 .component-form input,
-.component-form textarea {
+.component-form textarea,
+.component-form select {
 	display: block;
 	width: 100%;
 	border: 1px solid var(--ink);
@@ -342,10 +343,68 @@ button:disabled {
 }
 
 .component-form input:focus,
-.component-form textarea:focus {
+.component-form textarea:focus,
+.component-form select:focus {
 	border-color: var(--accent);
 	outline: 3px solid rgb(49 91 61 / 18%);
 	outline-offset: -3px;
+}
+
+.relationship-editor {
+	margin: 24px 0 0;
+	border: 0;
+	border-top: 1px solid var(--hairline);
+	padding: 20px 0 0;
+}
+
+.relationship-editor legend {
+	padding: 0 10px 0 0;
+	font-family: "Newsreader Variable", serif;
+	font-size: 1.25rem;
+	font-weight: 520;
+}
+
+.relationship-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 8px 12px;
+	margin-top: 18px;
+	border-bottom: 1px solid var(--hairline);
+	padding-bottom: 18px;
+}
+
+.relationship-row label,
+.relationship-row select,
+.relationship-row textarea {
+	grid-column: 1;
+}
+
+.component-form .relationship-row label {
+	margin-top: 4px;
+}
+
+.component-form .relationship-row textarea {
+	min-height: 4.5rem;
+	font-family: "IBM Plex Sans", sans-serif;
+	font-size: 0.95rem;
+}
+
+.relationship-remove {
+	grid-column: 2;
+	grid-row: 1 / span 2;
+	align-self: start;
+	min-height: auto;
+	margin-top: 4px;
+}
+
+.relationship-empty {
+	margin: 14px 0 0;
+	color: var(--muted-ink);
+	font-size: 0.9rem;
+}
+
+.component-form .relationship-add {
+	margin-top: 14px;
 }
 
 .component-form .button-group {

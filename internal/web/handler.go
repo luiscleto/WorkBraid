@@ -233,19 +233,28 @@ type relationshipResponse struct {
 }
 
 type pendingComponentResponse struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	New         bool   `json:"new"`
+	ID            string                 `json:"id"`
+	Title         string                 `json:"title"`
+	Description   string                 `json:"description"`
+	New           bool                   `json:"new"`
+	Relationships []relationshipResponse `json:"relationships"`
+}
+
+type relationshipTargetResponse struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Context string `json:"context,omitempty"`
+	New     bool   `json:"new,omitempty"`
 }
 
 type changesResponse struct {
-	Components     []pendingComponentResponse `json:"components"`
-	Valid          bool                       `json:"valid"`
-	ValidationCode string                     `json:"validation_code,omitempty"`
-	ValidationItem string                     `json:"validation_item,omitempty"`
-	Review         *reviewResponse            `json:"review,omitempty"`
-	ReviewBlocker  string                     `json:"review_blocker,omitempty"`
+	Components          []pendingComponentResponse   `json:"components"`
+	RelationshipTargets []relationshipTargetResponse `json:"relationship_targets"`
+	Valid               bool                         `json:"valid"`
+	ValidationCode      string                       `json:"validation_code,omitempty"`
+	ValidationItem      string                       `json:"validation_item,omitempty"`
+	Review              *reviewResponse              `json:"review,omitempty"`
+	ReviewBlocker       string                       `json:"review_blocker,omitempty"`
 }
 
 type reviewResponse struct {
@@ -286,14 +295,21 @@ func responseForSnapshot(sourceRoot, projectName string, snapshot architecture.S
 	if pending != nil && pending.storeID == snapshot.StoreID() && pending.baseRevision == snapshot.Revision() {
 		changes := make([]pendingComponentResponse, len(pending.changes))
 		for index, change := range pending.changes {
-			changes[index] = pendingComponentResponse{ID: change.ID, Title: change.Title, Description: change.Description, New: change.New}
+			relationships := make([]relationshipResponse, len(change.Relationships))
+			for relationshipIndex, relationship := range change.Relationships {
+				relationships[relationshipIndex] = relationshipResponse{TargetID: relationship.TargetID, Label: relationship.Label}
+			}
+			changes[index] = pendingComponentResponse{
+				ID: change.ID, Title: change.Title, Description: change.Description, New: change.New, Relationships: relationships,
+			}
 		}
 		result.Changes = &changesResponse{
-			Components:     changes,
-			Valid:          pending.candidate != nil,
-			ValidationCode: pending.validationCode,
-			ValidationItem: pending.validationItem,
-			ReviewBlocker:  pending.reviewBlocker,
+			Components:          changes,
+			RelationshipTargets: relationshipTargets(accepted, pending.changes),
+			Valid:               pending.candidate != nil,
+			ValidationCode:      pending.validationCode,
+			ValidationItem:      pending.validationItem,
+			ReviewBlocker:       pending.reviewBlocker,
 		}
 		if pending.review != nil && pending.review.generation == pending.generation && pending.candidate != nil && pending.review.candidateTree == pending.candidate.Tree() {
 			result.Changes.Review = &reviewResponse{
@@ -303,6 +319,43 @@ func responseForSnapshot(sourceRoot, projectName string, snapshot architecture.S
 		}
 	}
 	return result
+}
+
+func relationshipTargets(accepted []architecture.AuthoringComponent, changes []architecture.ComponentChange) []relationshipTargetResponse {
+	changesByID := make(map[string]architecture.ComponentChange, len(changes))
+	for _, change := range changes {
+		changesByID[change.ID] = change
+	}
+	targets := make([]relationshipTargetResponse, 0, len(accepted)+len(changes))
+	for _, component := range accepted {
+		title := component.Title
+		if change, exists := changesByID[component.ID]; exists {
+			title = change.Title
+		}
+		targets = append(targets, relationshipTargetResponse{ID: component.ID, Title: title, Context: component.Filename})
+	}
+	for _, change := range changes {
+		if change.New {
+			targets = append(targets, relationshipTargetResponse{ID: change.ID, Title: change.Title, Context: filepath.Base(change.Path), New: true})
+		}
+	}
+	titleCounts := make(map[string]int, len(targets))
+	for _, target := range targets {
+		titleCounts[presentedTargetTitle(target.Title)]++
+	}
+	for index := range targets {
+		if titleCounts[presentedTargetTitle(targets[index].Title)] < 2 {
+			targets[index].Context = ""
+		}
+	}
+	return targets
+}
+
+func presentedTargetTitle(title string) string {
+	if strings.TrimSpace(title) == "" {
+		return "Untitled component"
+	}
+	return title
 }
 
 func (h *Handler) initializeProject(response http.ResponseWriter, request *http.Request) {
@@ -451,12 +504,14 @@ func (h *Handler) leaveProject(response http.ResponseWriter, request *http.Reque
 }
 
 type componentMutationRequest struct {
-	SourceRoot         string `json:"source_root"`
-	ComponentID        string `json:"component_id,omitempty"`
-	Title              string `json:"title,omitempty"`
-	Description        string `json:"description,omitempty"`
-	TitleChanged       bool   `json:"title_changed,omitempty"`
-	DescriptionChanged bool   `json:"description_changed,omitempty"`
+	SourceRoot           string                 `json:"source_root"`
+	ComponentID          string                 `json:"component_id,omitempty"`
+	Title                string                 `json:"title,omitempty"`
+	Description          string                 `json:"description,omitempty"`
+	TitleChanged         bool                   `json:"title_changed,omitempty"`
+	DescriptionChanged   bool                   `json:"description_changed,omitempty"`
+	Relationships        []relationshipResponse `json:"relationships,omitempty"`
+	RelationshipsChanged bool                   `json:"relationships_changed,omitempty"`
 }
 
 func (h *Handler) addComponent(response http.ResponseWriter, request *http.Request) {
@@ -527,6 +582,8 @@ func (h *Handler) mutateComponent(response http.ResponseWriter, request *http.Re
 	changeIndex := -1
 	if add {
 		change = h.architecture.NewComponentChange(snapshot, h.pending.changes, payload.Title, payload.Description)
+		change.Relationships = authoringRelationships(payload.Relationships)
+		change.RelationshipsChanged = true
 	} else {
 		for index := range h.pending.changes {
 			if h.pending.changes[index].ID == payload.ComponentID {
@@ -550,6 +607,10 @@ func (h *Handler) mutateComponent(response http.ResponseWriter, request *http.Re
 		if payload.DescriptionChanged {
 			change.Description = payload.Description
 			change.DescriptionChanged = true
+		}
+		if payload.RelationshipsChanged {
+			change.Relationships = authoringRelationships(payload.Relationships)
+			change.RelationshipsChanged = true
 		}
 	}
 	if changeIndex >= 0 {
@@ -576,6 +637,10 @@ func (h *Handler) mutateComponent(response http.ResponseWriter, request *http.Re
 			h.pending.validationCode = "title_required"
 		case errors.Is(err, architecture.ErrTitleOneLine):
 			h.pending.validationCode = "title_one_line"
+		case errors.Is(err, architecture.ErrRelationshipLabelRequired):
+			h.pending.validationCode = "relationship_label_required"
+		case errors.Is(err, architecture.ErrRelationshipTargetRequired):
+			h.pending.validationCode = "relationship_target_required"
 		case errors.Is(err, architecture.ErrInvalid):
 			h.pending.validationCode = "change_invalid"
 		default:
@@ -587,6 +652,14 @@ func (h *Handler) mutateComponent(response http.ResponseWriter, request *http.Re
 		h.pending.candidate = &candidate
 	}
 	writeJSON(response, http.StatusOK, responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, h.pending, h.loadedStale, h.acceptedDiff))
+}
+
+func authoringRelationships(values []relationshipResponse) []architecture.AuthoringRelationship {
+	relationships := make([]architecture.AuthoringRelationship, len(values))
+	for index, value := range values {
+		relationships[index] = architecture.AuthoringRelationship{TargetID: value.TargetID, Label: value.Label}
+	}
+	return relationships
 }
 
 func normalizeAuthoredDescription(description string) string {
@@ -799,6 +872,10 @@ func (h *Handler) recordCandidateValidation(pending *pendingChangeSet, err error
 		pending.validationCode = "title_required"
 	case errors.Is(err, architecture.ErrTitleOneLine):
 		pending.validationCode = "title_one_line"
+	case errors.Is(err, architecture.ErrRelationshipLabelRequired):
+		pending.validationCode = "relationship_label_required"
+	case errors.Is(err, architecture.ErrRelationshipTargetRequired):
+		pending.validationCode = "relationship_target_required"
 	case !errors.Is(err, architecture.ErrInvalid):
 		pending.validationCode = "change_unavailable"
 	}

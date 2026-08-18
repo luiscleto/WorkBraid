@@ -49,6 +49,7 @@ type component struct {
 	relationships []componentRelationship
 	mode          string
 	source        []byte
+	markdownStart int
 	headingStart  int
 	headingEnd    int
 	headingStyle  headingStyle
@@ -123,11 +124,16 @@ func (snapshot Snapshot) ChangeForAcceptedComponent(id string) (ComponentChange,
 	}
 	for _, component := range snapshot.components {
 		if component.id == parsed {
+			relationships := make([]AuthoringRelationship, len(component.relationships))
+			for index, relationship := range component.relationships {
+				relationships[index] = AuthoringRelationship{TargetID: relationship.target.String(), Label: relationship.label}
+			}
 			return ComponentChange{
-				ID:          component.id.String(),
-				Title:       component.title,
-				Description: string(component.body),
-				Path:        component.path,
+				ID:            component.id.String(),
+				Title:         component.title,
+				Description:   string(component.body),
+				Path:          component.path,
+				Relationships: relationships,
 			}, true
 		}
 	}
@@ -138,13 +144,15 @@ func (snapshot Snapshot) ChangeForAcceptedComponent(id string) (ComponentChange,
 // Architecture change set. Its path and identity are assigned by the backend,
 // never by browser input.
 type ComponentChange struct {
-	ID                 string
-	Title              string
-	Description        string
-	Path               string
-	New                bool
-	TitleChanged       bool
-	DescriptionChanged bool
+	ID                   string
+	Title                string
+	Description          string
+	Path                 string
+	New                  bool
+	TitleChanged         bool
+	DescriptionChanged   bool
+	Relationships        []AuthoringRelationship
+	RelationshipsChanged bool
 }
 
 // Candidate is a completely constructed and validated non-canonical tree.
@@ -162,8 +170,10 @@ func (candidate Candidate) SnapshotAt(revision string) Snapshot {
 }
 
 var (
-	ErrTitleRequired = errors.New("component title is required")
-	ErrTitleOneLine  = errors.New("component title must fit on one line")
+	ErrTitleRequired              = errors.New("component title is required")
+	ErrTitleOneLine               = errors.New("component title must fit on one line")
+	ErrRelationshipLabelRequired  = errors.New("relationship label is required")
+	ErrRelationshipTargetRequired = errors.New("relationship target is required")
 )
 
 type ComponentValidationError struct {
@@ -524,8 +534,15 @@ func (manager *Manager) ConstructCandidate(ctx context.Context, base Snapshot, c
 	}
 
 	baseByID := make(map[string]component, len(base.components))
+	candidateIDs := make(map[string]struct{}, len(base.components)+len(changes))
 	for _, component := range base.components {
 		baseByID[component.id.String()] = component
+		candidateIDs[component.id.String()] = struct{}{}
+	}
+	for _, change := range changes {
+		if change.New {
+			candidateIDs[change.ID] = struct{}{}
+		}
 	}
 	seenIDs := make(map[string]struct{}, len(changes))
 	for _, change := range changes {
@@ -538,6 +555,22 @@ func (manager *Manager) ConstructCandidate(ctx context.Context, base Snapshot, c
 		}
 		if strings.ContainsAny(change.Title, "\r\n") {
 			return Candidate{}, &ComponentValidationError{ComponentID: change.ID, Err: ErrTitleOneLine}
+		}
+		if change.RelationshipsChanged || change.New {
+			for _, relationship := range change.Relationships {
+				if strings.TrimSpace(relationship.Label) == "" {
+					return Candidate{}, &ComponentValidationError{ComponentID: change.ID, Err: ErrRelationshipLabelRequired}
+				}
+				if strings.TrimSpace(relationship.TargetID) == "" {
+					return Candidate{}, &ComponentValidationError{ComponentID: change.ID, Err: ErrRelationshipTargetRequired}
+				}
+				if _, err := uuid.Parse(relationship.TargetID); err != nil {
+					return Candidate{}, &ComponentValidationError{ComponentID: change.ID, Err: ErrRelationshipTargetRequired}
+				}
+				if _, exists := candidateIDs[relationship.TargetID]; !exists {
+					return Candidate{}, &ComponentValidationError{ComponentID: change.ID, Err: ErrRelationshipTargetRequired}
+				}
+			}
 		}
 
 		var source []byte
@@ -555,14 +588,20 @@ func (manager *Manager) ConstructCandidate(ctx context.Context, base Snapshot, c
 			if _, err := uuid.Parse(change.ID); err != nil {
 				return Candidate{}, fmt.Errorf("%w: new component identity is invalid", ErrInvalid)
 			}
-			source = newComponentSource(change)
+			source, err = newComponentSource(change)
+			if err != nil {
+				return Candidate{}, fmt.Errorf("serialize new component metadata: %w", err)
+			}
 		} else {
 			accepted, exists := baseByID[change.ID]
 			if !exists || accepted.path != change.Path {
 				return Candidate{}, fmt.Errorf("%w: changed component does not belong to the accepted base", ErrInvalid)
 			}
 			mode = accepted.mode
-			source = editedComponentSource(accepted, change)
+			source, err = editedComponentSource(accepted, change)
+			if err != nil {
+				return Candidate{}, fmt.Errorf("serialize changed component metadata: %w", err)
+			}
 			if bytes.Equal(source, accepted.source) {
 				continue
 			}
@@ -693,11 +732,15 @@ func validNewComponentPath(path string) bool {
 	return relative != "" && !strings.Contains(relative, "/")
 }
 
-func newComponentSource(change ComponentChange) []byte {
-	return []byte(fmt.Sprintf("---\nid: %q\n---\n# %s\n%s", change.ID, escapeMarkdownTitle(change.Title), change.Description))
+func newComponentSource(change ComponentChange) ([]byte, error) {
+	frontmatter, err := marshalComponentFrontmatter(change.ID, change.Relationships)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(frontmatter + "# " + escapeMarkdownTitle(change.Title) + "\n" + change.Description), nil
 }
 
-func editedComponentSource(accepted component, change ComponentChange) []byte {
+func editedComponentSource(accepted component, change ComponentChange) ([]byte, error) {
 	heading := accepted.source[accepted.headingStart:accepted.headingEnd]
 	if change.TitleChanged && change.Title != accepted.title {
 		heading = replacementHeading(accepted, change.Title)
@@ -710,7 +753,49 @@ func editedComponentSource(accepted component, change ComponentChange) []byte {
 	source = append(source, accepted.source[:accepted.headingStart]...)
 	source = append(source, heading...)
 	source = append(source, body...)
-	return source
+	if change.RelationshipsChanged {
+		frontmatter, err := marshalComponentFrontmatter(change.ID, change.Relationships)
+		if err != nil {
+			return nil, err
+		}
+		rewritten := make([]byte, 0, len(frontmatter)+len(source)-accepted.markdownStart)
+		rewritten = append(rewritten, frontmatter...)
+		rewritten = append(rewritten, source[accepted.markdownStart:]...)
+		return rewritten, nil
+	}
+	return source, nil
+}
+
+func marshalComponentFrontmatter(id string, relationships []AuthoringRelationship) (string, error) {
+	metadata := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	metadata.Content = append(metadata.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "id"},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: id, Style: yaml.DoubleQuotedStyle},
+	)
+	if len(relationships) > 0 {
+		sequence := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		for _, relationship := range relationships {
+			item := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			item.Content = append(item.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "target"},
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: relationship.TargetID, Style: yaml.DoubleQuotedStyle},
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "label"},
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: relationship.Label, Style: yaml.DoubleQuotedStyle},
+			)
+			sequence.Content = append(sequence.Content, item)
+		}
+		metadata.Content = append(metadata.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "relationships"},
+			sequence,
+		)
+	}
+	var contents bytes.Buffer
+	encoder := yaml.NewEncoder(&contents)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(metadata); err != nil {
+		return "", err
+	}
+	return "---\n" + contents.String() + "---\n", nil
 }
 
 func replacementHeading(accepted component, title string) []byte {
@@ -749,7 +834,7 @@ func escapeMarkdownTitle(title string) string {
 
 type componentFrontmatter struct {
 	ID            string                      `yaml:"id"`
-	Relationships []componentRelationshipYAML `yaml:"relationships"`
+	Relationships []componentRelationshipYAML `yaml:"relationships,omitempty"`
 }
 
 type componentRelationshipYAML struct {
@@ -822,6 +907,7 @@ func parseComponent(path string, contents []byte) (component, error) {
 		title:         title,
 		body:          body,
 		relationships: relationships,
+		markdownStart: markdownStart,
 		headingStart:  markdownStart + headingStart,
 		headingEnd:    markdownStart + bodyStart,
 		headingStyle:  style,

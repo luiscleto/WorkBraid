@@ -435,6 +435,121 @@ func TestConstructCandidatePreservesExactExistingSourceSectionsAndAcceptedAuthor
 	}
 }
 
+func TestConstructCandidateRelationshipReplacementPreservesAuthoredSectionsAndLabelValues(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	storeID := uuid.NewString()
+	bootstrap, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath, _ := manager.StorePath(storeID)
+	manifest := gitBytes(t, "--git-dir", storePath, "show", bootstrap.Revision()+":architecture.yaml")
+	sourceID := uuid.NewString()
+	targetID := uuid.NewString()
+	otherID := uuid.NewString()
+	source := []byte("---\r\nid: \"" + sourceID + "\"\r\nrelationships:\r\n  - target: \"" + targetID + "\"\r\n    label: |-\r\n      line one\r\n      line two\r\n  - target: \"" + otherID + "\"\r\n    label: \"  padded  \"\r\n---\r\n \r\n# Source #\r\n\r\nExact body  \r\n")
+	target := []byte("---\nid: \"" + targetID + "\"\n---\n# Target\nBody\n")
+	other := []byte("---\nid: \"" + otherID + "\"\n---\n# Other\nBody\n")
+	untouchedBlob := writeTestBlob(t, storePath, other)
+	components := mktree(t, storePath,
+		"100644 blob "+untouchedBlob+"\tother.md\n"+
+			"100755 blob "+writeTestBlob(t, storePath, source)+"\tsource.md\n"+
+			"100644 blob "+writeTestBlob(t, storePath, target)+"\ttarget.md\n")
+	accepted := commitManifestTree(t, storePath, manifest, "100644", []string{"040000 tree " + components + "\tcomponents"})
+	gitText(t, "--git-dir", storePath, "update-ref", acceptedRef, accepted, bootstrap.Revision())
+	base, err := manager.LoadAccepted(context.Background(), storeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	change, found := base.ChangeForAcceptedComponent(sourceID)
+	if !found || len(change.Relationships) != 2 || change.Relationships[0].Label != "line one\nline two" || change.Relationships[1].Label != "  padded  " {
+		t.Fatalf("loaded authored labels = %+v", change.Relationships)
+	}
+	change.Relationships = []AuthoringRelationship{
+		change.Relationships[0],
+		{TargetID: targetID, Label: "  publishes: [events] # α\nnext line  "},
+	}
+	change.RelationshipsChanged = true
+	candidate, err := manager.ConstructCandidate(context.Background(), base, []ComponentChange{change})
+	if err != nil {
+		t.Fatalf("construct relationship candidate: %v", err)
+	}
+	got := gitBytes(t, "--git-dir", storePath, "show", candidate.Tree()+":components/source.md")
+	markdownStart := bytes.Index(source, []byte(" \r\n# Source #"))
+	gotMarkdownStart := bytes.Index(got, []byte(" \r\n# Source #"))
+	if markdownStart < 0 || gotMarkdownStart < 0 || !bytes.Equal(got[gotMarkdownStart:], source[markdownStart:]) {
+		t.Fatalf("relationship edit changed H1/body bytes\ngot:  %q\nwant suffix: %q", got, source[markdownStart:])
+	}
+	if mode := strings.Fields(gitText(t, "--git-dir", storePath, "ls-tree", candidate.Tree(), "components/source.md"))[0]; mode != "100755" {
+		t.Fatalf("relationship edit mode = %q, want 100755", mode)
+	}
+	if entry := gitText(t, "--git-dir", storePath, "ls-tree", candidate.Tree(), "components/other.md"); !strings.Contains(entry, untouchedBlob) {
+		t.Fatalf("unmodified component did not retain blob %s: %s", untouchedBlob, entry)
+	}
+	var gotRelationships []AuthoringRelationship
+	for _, component := range candidate.Snapshot().AuthoringComponents() {
+		if component.ID == sourceID {
+			gotRelationships = component.Relationships
+		}
+	}
+	wantLabels := []string{"line one\nline two", "  publishes: [events] # α\nnext line  "}
+	if len(gotRelationships) != 2 || gotRelationships[0].Label != wantLabels[0] || gotRelationships[1].Label != wantLabels[1] {
+		t.Fatalf("candidate relationship order/labels = %+v, want %#v", gotRelationships, wantLabels)
+	}
+
+	change.Relationships = nil
+	removed, err := manager.ConstructCandidate(context.Background(), base, []ComponentChange{change})
+	if err != nil {
+		t.Fatalf("remove all relationships: %v", err)
+	}
+	removedSource := gitBytes(t, "--git-dir", storePath, "show", removed.Tree()+":components/source.md")
+	removedRelationships := []AuthoringRelationship(nil)
+	for _, component := range removed.Snapshot().AuthoringComponents() {
+		if component.ID == sourceID {
+			removedRelationships = component.Relationships
+		}
+	}
+	if bytes.Contains(removedSource, []byte("relationships:")) || len(removedRelationships) != 0 {
+		t.Fatalf("removed relationship metadata remained: %q", removedSource)
+	}
+}
+
+func TestConstructCandidateResolvesRelationshipToPendingNewComponent(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	storeID := uuid.NewString()
+	bootstrap, err := manager.InitializeOrLoad(context.Background(), storeID, "Project", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath, _ := manager.StorePath(storeID)
+	manifest := gitBytes(t, "--git-dir", storePath, "show", bootstrap.Revision()+":architecture.yaml")
+	sourceID := uuid.NewString()
+	source := []byte("---\nid: \"" + sourceID + "\"\n---\n# Source\nBody\n")
+	components := mktree(t, storePath, "100644 blob "+writeTestBlob(t, storePath, source)+"\tsource.md\n")
+	accepted := commitManifestTree(t, storePath, manifest, "100644", []string{"040000 tree " + components + "\tcomponents"})
+	gitText(t, "--git-dir", storePath, "update-ref", acceptedRef, accepted, bootstrap.Revision())
+	base, err := manager.LoadAccepted(context.Background(), storeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := manager.NewComponentChange(base, nil, "New target", "Body\n")
+	change, _ := base.ChangeForAcceptedComponent(sourceID)
+	change.Relationships = []AuthoringRelationship{{TargetID: created.ID, Label: "calls"}}
+	change.RelationshipsChanged = true
+	candidate, err := manager.ConstructCandidate(context.Background(), base, []ComponentChange{created, change})
+	if err != nil {
+		t.Fatalf("complete candidate did not resolve pending target: %v", err)
+	}
+	if candidate.Snapshot().ComponentCount() != 2 {
+		t.Fatalf("candidate component count = %d", candidate.Snapshot().ComponentCount())
+	}
+	change.Relationships[0].TargetID = uuid.NewString()
+	if _, err := manager.ConstructCandidate(context.Background(), base, []ComponentChange{created, change}); !errors.Is(err, ErrRelationshipTargetRequired) {
+		t.Fatalf("unresolved target error = %v", err)
+	}
+}
+
 func TestConstructCandidateAddsMultipleComponentsWithStableCreationPaths(t *testing.T) {
 	manager := NewManager(t.TempDir())
 	storeID := uuid.NewString()
