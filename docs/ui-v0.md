@@ -34,6 +34,30 @@ A **drafting table**: one surface, hairline structure, warm paper, almost no rad
 - Screens that share a product must look like one product.
 - The architecture map is a 2D drawing unless a later approved visual spec says otherwise.
 
+## Architecture workspace
+
+Project opening and setup are entry states, not permanent workspace chrome. Once a project is open, the opening sheet is gone and WorkBraid shows a map-centered Architecture workbench.
+
+On a normal desktop viewport, the workbench has:
+
+- a compact component index for navigation;
+- the accepted Architecture map as the primary canvas;
+- one contextual working pane for the current task: accepted component documentation or structured authoring.
+
+The component index and map are projections of the same exact accepted Architecture revision. Pending title changes do not alter either surface before acceptance, and pending new components do not appear in them. Pending components remain reachable through **Changes in progress**.
+
+The component index is not a management or dashboard surface. It selects components by stable identity and primarily shows their titles, plus only the minimal component-creation affordance needed. When titles collide, show the minimum filename or shortened-ID context needed to disambiguate them. Do not make IDs or paths general index chrome, and do not add status columns, per-component management controls, filters, or speculative controls.
+
+Selecting a component from the map or index focuses the same accepted component and shows its documentation in the working pane. Add/Edit uses that pane for structured component and relationship authoring. The accepted map does not preview pending topology.
+
+**Changes in progress** is a compact visible workspace affordance. It reuses the working area for pending editing, review, and acceptance rather than becoming another permanent region. Exact diff review may temporarily expand into more of the workspace when the task requires it.
+
+Pending work whose accepted base is stale remains visible and read-only through **Changes in progress**. It cannot be reviewed or accepted. The human may discard that whole non-canonical change set so new work can begin from current accepted Architecture; discard is not partial editing, reconciliation, or undo.
+
+The application frame keeps the current project and Architecture context visible, with compact actions for explicit refresh and opening another project. Do not permanently display a positive current/accepted status merely because it exists. Make stale or non-current state conspicuous when relevant; otherwise let the workspace stay quiet.
+
+The same surfaces may collapse into one-at-a-time views on narrower layouts. Mobile-specific interaction remains deferred.
+
 ## Map references
 
 These images are tone and information-design references for a later map, not the first-slice widget set and not a 3D assignment:
