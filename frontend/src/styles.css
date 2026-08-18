@@ -545,13 +545,18 @@ dd {
 /* Architecture workbench: one drafting surface after project opening. */
 .workspace-shell {
   width: min(1540px, calc(100% - 32px));
+  height: calc(100vh - 32px);
   min-height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
   margin: 16px auto;
   border: 1px solid var(--ink);
+  overflow: hidden;
   background: var(--paper);
 }
 
 .application-frame {
+  flex: 0 0 auto;
   min-height: 72px;
   display: flex;
   align-items: center;
@@ -605,6 +610,7 @@ dd {
 }
 
 .stale-banner {
+  flex: 0 0 auto;
   padding: 10px 18px;
   border-bottom: 1px solid var(--ink);
   background: #e8d6b6;
@@ -613,20 +619,25 @@ dd {
 }
 
 .architecture-workbench {
-  min-height: calc(100vh - 105px);
+  min-height: 0;
+  flex: 1 1 auto;
   display: grid;
   grid-template-columns: minmax(180px, 0.72fr) minmax(420px, 2.2fr) minmax(300px, 1.15fr);
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .component-index,
 .map-region,
 .working-pane {
   min-width: 0;
+  min-height: 0;
 }
 
 .component-index {
   padding: 20px 0;
   border-right: 1px solid var(--hairline);
+  overflow-y: auto;
 }
 
 .index-heading {
@@ -728,7 +739,6 @@ dd {
 
 .map-region {
   position: relative;
-  min-height: 590px;
   border-right: 1px solid var(--hairline);
   background-image:
     linear-gradient(rgb(32 33 27 / 5%) 1px, transparent 1px),
@@ -752,7 +762,7 @@ dd {
 .map-canvas {
   width: 100%;
   height: 100%;
-  min-height: 590px;
+  min-height: 0;
 }
 
 .map-fit {
@@ -774,7 +784,8 @@ dd {
 }
 
 .map-empty {
-  min-height: 590px;
+  height: 100%;
+  min-height: 0;
   display: grid;
   place-items: center;
   padding: 32px;
@@ -786,7 +797,8 @@ dd {
   display: flex;
   flex-direction: column;
   padding: 28px clamp(20px, 2.4vw, 36px) 20px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .pane-heading {
@@ -806,13 +818,18 @@ dd {
   font-weight: 480;
   letter-spacing: -0.035em;
   line-height: 0.98;
+  overflow-wrap: anywhere;
 }
 
 .component-documentation {
+  min-width: 0;
   min-height: 0;
+  max-width: 100%;
 }
 
 .markdown-body {
+  min-width: 0;
+  max-width: 100%;
   padding: 22px 0 8px;
   overflow-wrap: anywhere;
   font-size: 0.94rem;
@@ -833,6 +850,7 @@ dd {
 }
 
 .markdown-body pre {
+  max-width: 100%;
   overflow: auto;
   border-block: 1px solid var(--hairline);
   padding: 13px 0;
@@ -841,6 +859,9 @@ dd {
 
 .markdown-body table {
   width: 100%;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
   border-collapse: collapse;
 }
 
@@ -955,7 +976,9 @@ dd {
 @media (max-width: 760px) {
   .workspace-shell {
     width: calc(100% - 16px);
+    height: auto;
     margin: 8px;
+    overflow: visible;
   }
 
   .application-frame,
@@ -970,12 +993,18 @@ dd {
 
   .architecture-workbench {
     display: block;
+    overflow: visible;
   }
 
   .component-index,
   .map-region {
     border-right: 0;
     border-bottom: 1px solid var(--hairline);
+  }
+
+  .component-index,
+  .working-pane {
+    overflow: visible;
   }
 
   .map-region,
