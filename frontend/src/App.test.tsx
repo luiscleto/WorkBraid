@@ -310,6 +310,9 @@ describe('App', () => {
     expect(within(technicalDetails).getByRole('heading', { name: 'Parent diff' })).toBeInTheDocument()
     expect(requestPath(fetchMock, 1)).toBe('/api/architecture/review')
     expect(requestPath(fetchMock, 2)).toBe('/api/architecture/accept')
+    expect(requestBody(fetchMock, 2)).toEqual({
+      source_root: '/tmp/example', base_revision: base, candidate_tree: candidate, generation: 1,
+    })
   })
 
   it('turns an invalid quiet pending title into actionable guidance only at review', async () => {
@@ -373,6 +376,47 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Review changes' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Update architecture' })).not.toBeInTheDocument()
   })
+
+  it.each(['lost response', 'unreadable response body'])(
+    'does not offer a duplicate update after an ambiguous %s',
+    async (failure) => {
+      const reviewed = {
+        source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: '1'.repeat(40),
+        component_count: 0, component_titles: [], components: [],
+        changes: {
+          valid: true,
+          components: [{ id: 'worker-id', title: 'Worker', description: '', new: true }],
+          review: {
+            diff: 'diff --git a/components/worker.md b/components/worker.md',
+            base_revision: '1'.repeat(40), candidate_tree: '2'.repeat(40), generation: 1,
+          },
+        },
+      }
+      let call = 0
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        if (call++ === 0) {
+          return new Response(JSON.stringify(reviewed), { status: 200, headers: { 'Content-Type': 'application/json' } })
+        }
+        if (failure === 'lost response') throw new Error('response lost after request')
+        return new Response('{not-json', { status: 200, headers: { 'Content-Type': 'application/json' } })
+      })
+      render(<App />)
+      await submitPath('/tmp/example')
+      const user = userEvent.setup()
+      await user.click(await screen.findByRole('button', { name: 'Update architecture' }))
+
+      const alert = await screen.findByRole('alert')
+      expect(alert).toHaveTextContent('WorkBraid could not confirm what happened. Open this project again to check its current architecture.')
+      expect(alert).not.toHaveTextContent(/try again/i)
+      expect(screen.queryByRole('button', { name: 'Update architecture' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Review changes' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /add component|edit/i })).not.toBeInTheDocument()
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(requestBody(fetchMock, 1)).toEqual({
+        source_root: '/tmp/example', base_revision: '1'.repeat(40), candidate_tree: '2'.repeat(40), generation: 1,
+      })
+    },
+  )
 
   it.each([
     ['architecture_unavailable', 409, 'Architecture unavailable', 'could not open the architecture linked to this project'],

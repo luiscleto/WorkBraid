@@ -97,7 +97,7 @@ func (gitRunner) diffTrees(ctx context.Context, repository, baseTree, candidateT
 	return runGit(ctx, nil,
 		"--git-dir", repository,
 		"diff-tree", "--no-commit-id", "-r", "-p",
-		"--no-ext-diff", "--no-textconv", "--no-color",
+		"--no-ext-diff", "--no-textconv", "--no-color", "--text",
 		"--src-prefix=a/", "--dst-prefix=b/",
 		baseTree, candidateTree,
 	)

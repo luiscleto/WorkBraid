@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -41,7 +42,7 @@ func TestReviewAcceptAndFreshApplicationReconstructsExactSuccessor(t *testing.T)
 		SourceRoot: filepath.Clean(source), ComponentID: gatewayID, Title: "Public Gateway", Description: "Receives requests.\n", TitleChanged: true, DescriptionChanged: true,
 	}))
 	second := decodeArchitectureResponse(t, postComponentMutation(t, handler, testOrigin, "/api/architecture/components/add", componentMutationRequest{
-		SourceRoot: filepath.Clean(source), Title: "Worker", Description: "Processes jobs.\n",
+		SourceRoot: filepath.Clean(source), Title: "Worker", Description: "Processes\x00jobs and literal \\x00.\n",
 	}))
 	if first.Changes == nil || second.Changes == nil || len(second.Changes.Components) != 2 {
 		t.Fatalf("multi-file pending state missing: %+v", second.Changes)
@@ -55,7 +56,8 @@ func TestReviewAcceptAndFreshApplicationReconstructsExactSuccessor(t *testing.T)
 	review := *reviewed.Changes.Review
 	if review.BaseRevision != base.Revision || review.CandidateTree != i22CandidateTree || review.Generation != 2 ||
 		!strings.Contains(review.Diff, "components/gateway-internal.md") || !strings.Contains(review.Diff, "components/worker.md") ||
-		!strings.Contains(review.Diff, `id: "`) {
+		!strings.Contains(review.Diff, `id: "`) || !strings.Contains(review.Diff, `+Processes\x00jobs and literal \\x00.`) ||
+		strings.Contains(review.Diff, "Binary files differ") {
 		t.Fatalf("review did not cover complete canonical candidate: %+v\n%s", review, review.Diff)
 	}
 	if state.pending == nil || state.pending.review == nil || state.pending.candidate == nil ||
@@ -63,8 +65,8 @@ func TestReviewAcceptAndFreshApplicationReconstructsExactSuccessor(t *testing.T)
 		t.Fatalf("review is not bound to the exact candidate/generation: %+v", state.pending)
 	}
 
-	// A mutation after review advances the pending generation. A concurrent old
-	// confirmation is rejected, and the new candidate must be reviewed again.
+	// A mutation after review advances the pending generation. Browser B reviews
+	// that newer generation before browser A submits its older confirmation.
 	firstID := second.Changes.Components[0].ID
 	mutated := decodeArchitectureResponse(t, postComponentMutation(t, handler, testOrigin, "/api/architecture/components/edit", componentMutationRequest{
 		SourceRoot: filepath.Clean(source), ComponentID: firstID, Description: "Receives public requests.\n", DescriptionChanged: true,
@@ -72,15 +74,22 @@ func TestReviewAcceptAndFreshApplicationReconstructsExactSuccessor(t *testing.T)
 	if mutated.Changes == nil || mutated.Changes.Review != nil || state.pending.generation != 3 {
 		t.Fatalf("mutation did not invalidate review: response=%+v pending=%+v", mutated.Changes, state.pending)
 	}
-	oldConfirmation := postArchitectureAction(t, handler, testOrigin, "/api/architecture/accept", source)
+	newerReviewed := decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
+	newerReview := *newerReviewed.Changes.Review
+	oldConfirmation := postAcceptChanges(t, handler, testOrigin, source, review)
 	oldConfirmationBody := decodeArchitectureResponse(t, oldConfirmation)
 	if oldConfirmation.Code != http.StatusConflict || oldConfirmationBody.ActionError != errorReviewChanged || oldConfirmationBody.Changes == nil || oldConfirmationBody.Changes.Review != nil {
 		t.Fatalf("old review confirmation status=%d body=%s", oldConfirmation.Code, oldConfirmation.Body.String())
 	}
-	reviewed = decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
-	review = *reviewed.Changes.Review
+	if state.pending == nil || state.pending.review == nil || state.pending.review.candidateTree != newerReview.CandidateTree || state.pending.review.generation != newerReview.Generation {
+		t.Fatalf("old browser confirmation displaced newer backend review: %+v", state.pending)
+	}
+	if got := runGit(t, dataDirectory, "--git-dir", storePath, "show-ref", "--verify", "--hash", "refs/heads/accepted"); got != base.Revision {
+		t.Fatalf("old browser confirmation advanced accepted to %s", got)
+	}
+	review = newerReview
 
-	acceptedResponse := postArchitectureAction(t, handler, testOrigin, "/api/architecture/accept", source)
+	acceptedResponse := postAcceptChanges(t, handler, testOrigin, source, review)
 	accepted := decodeArchitectureResponse(t, acceptedResponse)
 	if acceptedResponse.Code != http.StatusOK || accepted.Changes != nil || accepted.Revision == base.Revision || accepted.ComponentCount != 3 || accepted.ParentDiff != review.Diff {
 		t.Fatalf("accepted response status=%d body=%s", acceptedResponse.Code, acceptedResponse.Body.String())
@@ -115,7 +124,7 @@ func TestReviewAcceptAndFreshApplicationReconstructsExactSuccessor(t *testing.T)
 	if got := runGit(t, dataDirectory, "--git-dir", storePath, "show", "-s", "--format=%an <%ae>%n%s", accepted.Revision); got != "WorkBraid <architecture@workbraid.invalid>\nUpdate Architecture" {
 		t.Fatalf("uncontrolled commit identity/message: %q", got)
 	}
-	duplicate := postArchitectureAction(t, handler, testOrigin, "/api/architecture/accept", source)
+	duplicate := postAcceptChanges(t, handler, testOrigin, source, review)
 	if duplicate.Code != http.StatusConflict || !strings.Contains(duplicate.Body.String(), errorReviewFailed) {
 		t.Fatalf("duplicate confirmation status=%d body=%s", duplicate.Code, duplicate.Body.String())
 	}
@@ -188,7 +197,7 @@ func TestStalePreObservationPreservesPendingAndCreatesNoSuccessor(t *testing.T) 
 	decodeArchitectureResponse(t, postComponentMutation(t, handler, testOrigin, "/api/architecture/components/add", componentMutationRequest{
 		SourceRoot: filepath.Clean(source), Title: "Gateway", Description: "Body\n",
 	}))
-	decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
+	reviewed := decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
 	storePath := filepath.Join(dataDirectory, "architecture", associatedStoreID(t, db, filepath.Clean(source))+".git")
 	baseTree := runGit(t, dataDirectory, "--git-dir", storePath, "show", "-s", "--format=%T", base.Revision)
 	external := runGitWithInput(t, dataDirectory, []byte("External Architecture update\n"),
@@ -197,7 +206,7 @@ func TestStalePreObservationPreservesPendingAndCreatesNoSuccessor(t *testing.T) 
 	runGit(t, dataDirectory, "--git-dir", storePath, "update-ref", "refs/heads/accepted", external, base.Revision)
 	objectsBefore := runGit(t, dataDirectory, "--git-dir", storePath, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype) %(objectname)")
 
-	response := postArchitectureAction(t, handler, testOrigin, "/api/architecture/accept", source)
+	response := postAcceptChanges(t, handler, testOrigin, source, *reviewed.Changes.Review)
 	stale := decodeArchitectureResponse(t, response)
 	if response.Code != http.StatusConflict || stale.ActionError != errorArchitectureStale || !stale.Stale || stale.Changes == nil {
 		t.Fatalf("stale confirmation status=%d body=%s", response.Code, response.Body.String())
@@ -216,37 +225,36 @@ func TestStalePreObservationPreservesPendingAndCreatesNoSuccessor(t *testing.T) 
 	}
 }
 
-func TestFinalCASRaceLeavesWorkBraidCommitUnreferenced(t *testing.T) {
+func TestProductionHandlerFinalCASRacePreservesPendingAndMarksSnapshotStale(t *testing.T) {
 	db := openWebTestDatabase(t)
 	source := createSourceRepository(t)
 	dataDirectory := t.TempDir()
 	state, handler := newHandler(db, testOrigin, t.TempDir(), dataDirectory)
-	baseResponse := decodeArchitectureResponse(t, postInitializeProject(t, handler, testOrigin, source))
+	base := decodeArchitectureResponse(t, postInitializeProject(t, handler, testOrigin, source))
 	decodeArchitectureResponse(t, postComponentMutation(t, handler, testOrigin, "/api/architecture/components/add", componentMutationRequest{
 		SourceRoot: filepath.Clean(source), Title: "Gateway", Description: "Body\n",
 	}))
-	decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
-	base := *state.loadedSnapshot
-	candidate := state.pending.review.candidate
-	if observed, present, err := state.architecture.AcceptedRevision(t.Context(), base); err != nil || !present || observed != baseResponse.Revision {
-		t.Fatalf("pre-observation = %q present=%v err=%v", observed, present, err)
-	}
-	successor, err := state.architecture.CreateSuccessor(t.Context(), base, candidate)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reviewed := decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
 	storePath := filepath.Join(dataDirectory, "architecture", associatedStoreID(t, db, filepath.Clean(source))+".git")
-	baseTree := runGit(t, dataDirectory, "--git-dir", storePath, "show", "-s", "--format=%T", baseResponse.Revision)
+	baseTree := runGit(t, dataDirectory, "--git-dir", storePath, "show", "-s", "--format=%T", base.Revision)
 	external := runGitWithInput(t, dataDirectory, []byte("Racing accepted update\n"),
 		"-c", "user.name=External Human", "-c", "user.email=human@example.invalid",
-		"--git-dir", storePath, "commit-tree", baseTree, "-p", baseResponse.Revision)
-	runGit(t, dataDirectory, "--git-dir", storePath, "update-ref", "refs/heads/accepted", external, baseResponse.Revision)
-	updateErr := state.architecture.AdvanceAccepted(t.Context(), base, successor)
-	observed, present, observeErr := state.architecture.AcceptedRevision(t.Context(), base)
-	if updateErr == nil || observeErr != nil || !present || observed != external {
-		t.Fatalf("raced CAS observed=%q present=%v updateErr=%v observeErr=%v", observed, present, updateErr, observeErr)
+		"--git-dir", storePath, "commit-tree", baseTree, "-p", base.Revision)
+	var workbraidSuccessor string
+	state.beforeAcceptedCAS = func(successor string) {
+		workbraidSuccessor = successor
+		runGit(t, dataDirectory, "--git-dir", storePath, "update-ref", "refs/heads/accepted", external, base.Revision)
 	}
-	if refs := runGit(t, dataDirectory, "--git-dir", storePath, "for-each-ref", "--contains", successor, "--format=%(refname)"); refs != "" {
+
+	response := postAcceptChanges(t, handler, testOrigin, source, *reviewed.Changes.Review)
+	stale := decodeArchitectureResponse(t, response)
+	if response.Code != http.StatusConflict || stale.ActionError != errorArchitectureStale || !stale.Stale || stale.Changes == nil {
+		t.Fatalf("final-CAS race status=%d body=%s", response.Code, response.Body.String())
+	}
+	if workbraidSuccessor == "" || state.pending == nil || state.pending.review != nil || !state.loadedStale || state.loadedSnapshot.Revision() != base.Revision {
+		t.Fatalf("final-CAS race state successor=%q pending=%+v stale=%v loaded=%s", workbraidSuccessor, state.pending, state.loadedStale, state.loadedSnapshot.Revision())
+	}
+	if refs := runGit(t, dataDirectory, "--git-dir", storePath, "for-each-ref", "--contains", workbraidSuccessor, "--format=%(refname)"); refs != "" {
 		t.Fatalf("unaccepted WorkBraid successor is referenced: %s", refs)
 	}
 	if got := runGit(t, dataDirectory, "--git-dir", storePath, "show-ref", "--verify", "--hash", "refs/heads/accepted"); got != external {
@@ -262,18 +270,81 @@ func TestRefLockFailurePreservesPendingAndPostCASPublicationFailureConsumesIt(t 
 		state, handler := newHandler(db, testOrigin, t.TempDir(), dataDirectory)
 		base := decodeArchitectureResponse(t, postInitializeProject(t, handler, testOrigin, source))
 		decodeArchitectureResponse(t, postComponentMutation(t, handler, testOrigin, "/api/architecture/components/add", componentMutationRequest{SourceRoot: filepath.Clean(source), Title: "Gateway"}))
-		decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
+		reviewed := decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
 		storePath := filepath.Join(dataDirectory, "architecture", associatedStoreID(t, db, filepath.Clean(source))+".git")
 		lock := filepath.Join(storePath, "refs", "heads", "accepted.lock")
 		if err := os.WriteFile(lock, []byte("held"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		response := postArchitectureAction(t, handler, testOrigin, "/api/architecture/accept", source)
+		response := postAcceptChanges(t, handler, testOrigin, source, *reviewed.Changes.Review)
 		if response.Code != http.StatusInternalServerError || decodeArchitectureResponse(t, response).ActionError != errorUpdateFailed || state.pending == nil {
 			t.Fatalf("ref-lock failure status=%d body=%s pending=%+v", response.Code, response.Body.String(), state.pending)
 		}
 		if got := runGit(t, dataDirectory, "--git-dir", storePath, "show-ref", "--verify", "--hash", "refs/heads/accepted"); got != base.Revision {
 			t.Fatalf("ref-lock failure changed accepted: %s", got)
+		}
+	})
+
+	t.Run("request cancellation does not interrupt a confirmed authority transition", func(t *testing.T) {
+		db := openWebTestDatabase(t)
+		source := createSourceRepository(t)
+		dataDirectory := t.TempDir()
+		state, handler := newHandler(db, testOrigin, t.TempDir(), dataDirectory)
+		base := decodeArchitectureResponse(t, postInitializeProject(t, handler, testOrigin, source))
+		decodeArchitectureResponse(t, postComponentMutation(t, handler, testOrigin, "/api/architecture/components/add", componentMutationRequest{SourceRoot: filepath.Clean(source), Title: "Gateway"}))
+		reviewed := decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
+		payload := acceptChangesRequest{
+			SourceRoot: filepath.Clean(source), BaseRevision: reviewed.Changes.Review.BaseRevision,
+			CandidateTree: reviewed.Changes.Review.CandidateTree, Generation: reviewed.Changes.Review.Generation,
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/api/architecture/accept", bytes.NewReader(body))
+		request.Header.Set("Origin", testOrigin)
+		request.Header.Set("Content-Type", "application/json")
+		ctx, cancel := context.WithCancel(request.Context())
+		cancel()
+		request = request.WithContext(ctx)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		accepted := decodeArchitectureResponse(t, response)
+		if response.Code != http.StatusOK || accepted.Revision == base.Revision || state.pending != nil || state.loadedSnapshot.Revision() != accepted.Revision {
+			t.Fatalf("canceled-request transition status=%d body=%s pending=%+v", response.Code, response.Body.String(), state.pending)
+		}
+		storePath := filepath.Join(dataDirectory, "architecture", associatedStoreID(t, db, filepath.Clean(source))+".git")
+		if got := runGit(t, dataDirectory, "--git-dir", storePath, "show-ref", "--verify", "--hash", "refs/heads/accepted"); got != accepted.Revision {
+			t.Fatalf("canceled request did not complete authority transition: %s", got)
+		}
+	})
+
+	t.Run("reported failure after successful CAS is consumed once", func(t *testing.T) {
+		db := openWebTestDatabase(t)
+		source := createSourceRepository(t)
+		dataDirectory := t.TempDir()
+		state, handler := newHandler(db, testOrigin, t.TempDir(), dataDirectory)
+		base := decodeArchitectureResponse(t, postInitializeProject(t, handler, testOrigin, source))
+		decodeArchitectureResponse(t, postComponentMutation(t, handler, testOrigin, "/api/architecture/components/add", componentMutationRequest{SourceRoot: filepath.Clean(source), Title: "Gateway"}))
+		reviewed := decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
+		reported := 0
+		state.acceptedUpdateReportFailure = func() error {
+			reported++
+			return errors.New("reported failure after real accepted update")
+		}
+
+		response := postAcceptChanges(t, handler, testOrigin, source, *reviewed.Changes.Review)
+		accepted := decodeArchitectureResponse(t, response)
+		if response.Code != http.StatusOK || accepted.Revision == base.Revision || accepted.Changes != nil || state.pending != nil || reported != 1 {
+			t.Fatalf("reported-error-after-success status=%d body=%s pending=%+v reports=%d", response.Code, response.Body.String(), state.pending, reported)
+		}
+		storePath := filepath.Join(dataDirectory, "architecture", associatedStoreID(t, db, filepath.Clean(source))+".git")
+		if got := runGit(t, dataDirectory, "--git-dir", storePath, "show-ref", "--verify", "--hash", "refs/heads/accepted"); got != accepted.Revision {
+			t.Fatalf("observed attempted successor=%s response=%s", got, accepted.Revision)
+		}
+		duplicate := postAcceptChanges(t, handler, testOrigin, source, *reviewed.Changes.Review)
+		if duplicate.Code != http.StatusConflict || !strings.Contains(duplicate.Body.String(), errorReviewFailed) {
+			t.Fatalf("reported-error path offered duplicate status=%d body=%s", duplicate.Code, duplicate.Body.String())
 		}
 	})
 
@@ -286,9 +357,9 @@ func TestRefLockFailurePreservesPendingAndPostCASPublicationFailureConsumesIt(t 
 		state, handler := newHandler(db, testOrigin, t.TempDir(), dataDirectory)
 		base := decodeArchitectureResponse(t, postInitializeProject(t, handler, testOrigin, source))
 		decodeArchitectureResponse(t, postComponentMutation(t, handler, testOrigin, "/api/architecture/components/add", componentMutationRequest{SourceRoot: filepath.Clean(source), Title: "Gateway"}))
-		decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
+		reviewed := decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
 		state.publicationFailure = func() error { return errors.New("focused publication failure") }
-		response := postArchitectureAction(t, handler, testOrigin, "/api/architecture/accept", source)
+		response := postAcceptChanges(t, handler, testOrigin, source, *reviewed.Changes.Review)
 		updated := decodeArchitectureResponse(t, response)
 		if response.Code != http.StatusInternalServerError || updated.ActionError != errorUpdatedReload || updated.Revision == base.Revision || updated.Changes != nil || state.pending != nil {
 			t.Fatalf("post-CAS response status=%d body=%s pending=%+v", response.Code, response.Body.String(), state.pending)
@@ -297,7 +368,7 @@ func TestRefLockFailurePreservesPendingAndPostCASPublicationFailureConsumesIt(t 
 		if got := runGit(t, dataDirectory, "--git-dir", storePath, "show-ref", "--verify", "--hash", "refs/heads/accepted"); got != updated.Revision {
 			t.Fatalf("post-CAS failure lost successor: %s", got)
 		}
-		duplicate := postArchitectureAction(t, handler, testOrigin, "/api/architecture/accept", source)
+		duplicate := postAcceptChanges(t, handler, testOrigin, source, *reviewed.Changes.Review)
 		if duplicate.Code != http.StatusConflict || !strings.Contains(duplicate.Body.String(), errorReviewFailed) {
 			t.Fatalf("post-CAS duplicate status=%d body=%s", duplicate.Code, duplicate.Body.String())
 		}
@@ -323,6 +394,26 @@ func postArchitectureAction(t *testing.T, handler http.Handler, origin, path, so
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	if origin != "" {
+		request.Header.Set("Origin", origin)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func postAcceptChanges(t *testing.T, handler http.Handler, origin, sourceRoot string, review reviewResponse) *httptest.ResponseRecorder {
+	t.Helper()
+	payload := acceptChangesRequest{
+		SourceRoot: filepath.Clean(sourceRoot), BaseRevision: review.BaseRevision,
+		CandidateTree: review.CandidateTree, Generation: review.Generation,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/architecture/accept", bytes.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	if origin != "" {
 		request.Header.Set("Origin", origin)

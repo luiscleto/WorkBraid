@@ -43,6 +43,10 @@ type Handler struct {
 	// publicationFailure is a focused test seam at the concrete post-CAS
 	// publication boundary. Production never sets it.
 	publicationFailure func() error
+	// These two focused seams exercise real handler classification at the
+	// final CAS boundary. Production never sets them.
+	beforeAcceptedCAS           func(successor string)
+	acceptedUpdateReportFailure func() error
 }
 
 type loadedProject struct {
@@ -95,6 +99,13 @@ func newHandler(db *sql.DB, expectedOrigin, uiDirectory, dataDirectory string) (
 
 type openProjectRequest struct {
 	SourceRoot string `json:"source_root"`
+}
+
+type acceptChangesRequest struct {
+	SourceRoot    string `json:"source_root"`
+	BaseRevision  string `json:"base_revision"`
+	CandidateTree string `json:"candidate_tree"`
+	Generation    uint64 `json:"generation"`
 }
 
 type errorResponse struct {
@@ -524,7 +535,7 @@ func (h *Handler) reviewChanges(response http.ResponseWriter, request *http.Requ
 }
 
 func (h *Handler) acceptChanges(response http.ResponseWriter, request *http.Request) {
-	payload, ok := h.decodeArchitectureAction(response, request)
+	payload, ok := h.decodeAcceptChanges(response, request)
 	if !ok {
 		return
 	}
@@ -545,6 +556,17 @@ func (h *Handler) acceptChanges(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	review := pending.review
+	if payload.BaseRevision != review.baseRevision || payload.CandidateTree != review.candidateTree || payload.Generation != review.generation {
+		result := responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, pending, false, h.acceptedDiff)
+		result.ActionError = errorReviewChanged
+		if result.Changes != nil {
+			// The backend may hold a newer review for another browser. Do not
+			// expose it as though this client had inspected it.
+			result.Changes.Review = nil
+		}
+		writeJSON(response, http.StatusConflict, result)
+		return
+	}
 	if pending.storeID != snapshot.StoreID() || pending.baseRevision != snapshot.Revision() ||
 		review.baseRevision != pending.baseRevision || review.generation != pending.generation ||
 		pending.candidate == nil || review.candidateTree != pending.candidate.Tree() || review.candidateTree != review.candidate.Tree() {
@@ -583,7 +605,14 @@ func (h *Handler) acceptChanges(response http.ResponseWriter, request *http.Requ
 		writeJSON(response, http.StatusInternalServerError, result)
 		return
 	}
-	if updateErr := h.architecture.AdvanceAccepted(transitionContext, snapshot, successor); updateErr != nil {
+	if h.beforeAcceptedCAS != nil {
+		h.beforeAcceptedCAS(successor)
+	}
+	updateErr := h.architecture.AdvanceAccepted(transitionContext, snapshot, successor)
+	if updateErr == nil && h.acceptedUpdateReportFailure != nil {
+		updateErr = h.acceptedUpdateReportFailure()
+	}
+	if updateErr != nil {
 		observationContext, cancelObservation := context.WithTimeout(context.Background(), architectureObservationTimeout)
 		observed, present, observeErr := h.architecture.AcceptedRevision(observationContext, snapshot)
 		cancelObservation()
@@ -671,6 +700,22 @@ func (h *Handler) decodeArchitectureAction(response http.ResponseWriter, request
 	if err := decoder.Decode(&payload); err != nil || ensureJSONEnd(decoder) != nil {
 		writeJSON(response, http.StatusBadRequest, errorResponse{Code: errorLookupFailed})
 		return openProjectRequest{}, false
+	}
+	return payload, true
+}
+
+func (h *Handler) decodeAcceptChanges(response http.ResponseWriter, request *http.Request) (acceptChangesRequest, bool) {
+	if request.Header.Get("Origin") != h.expectedOrigin {
+		writeJSON(response, http.StatusForbidden, errorResponse{Code: errorOriginMismatch})
+		return acceptChangesRequest{}, false
+	}
+	request.Body = http.MaxBytesReader(response, request.Body, maxRequestBody)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	var payload acceptChangesRequest
+	if err := decoder.Decode(&payload); err != nil || ensureJSONEnd(decoder) != nil {
+		writeJSON(response, http.StatusBadRequest, errorResponse{Code: errorLookupFailed})
+		return acceptChangesRequest{}, false
 	}
 	return payload, true
 }

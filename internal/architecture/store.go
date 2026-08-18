@@ -609,7 +609,37 @@ func (manager *Manager) CandidateDiff(ctx context.Context, base Snapshot, candid
 	if err != nil {
 		return nil, err
 	}
-	return manager.git.diffTrees(ctx, storePath, base.revision, candidate.tree)
+	diff, err := manager.git.diffTrees(ctx, storePath, base.revision, candidate.tree)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(presentUnifiedDiff(diff)), nil
+}
+
+func presentUnifiedDiff(diff []byte) string {
+	var presented strings.Builder
+	for len(diff) > 0 {
+		value, size := utf8.DecodeRune(diff)
+		if value == utf8.RuneError && size == 1 {
+			fmt.Fprintf(&presented, "\\x%02x", diff[0])
+			diff = diff[1:]
+			continue
+		}
+		diff = diff[size:]
+		switch {
+		case value == '\n' || value == '\t':
+			presented.WriteRune(value)
+		case value == '\\':
+			presented.WriteString("\\\\")
+		case unicode.IsPrint(value):
+			presented.WriteRune(value)
+		case value <= 0xff:
+			fmt.Fprintf(&presented, "\\x%02x", value)
+		default:
+			fmt.Fprintf(&presented, "\\u{%x}", value)
+		}
+	}
+	return presented.String()
 }
 
 // CreateSuccessor creates a non-canonical commit object. Authority changes
