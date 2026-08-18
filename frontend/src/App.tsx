@@ -376,7 +376,12 @@ export function App() {
           </div>
         </header>
         {result.stale && <div className="stale-banner" role="alert">This view is out of date. Changes in progress remain tied to the architecture they started from.</div>}
-        {architectureNotice && <p className="workspace-notice" role="alert">{architectureNotice}</p>}
+        {architectureNotice && (
+          <div className="workspace-notice" role="alert">
+            <span>{architectureNotice}</span>
+            <button className="notice-dismiss" type="button" aria-label="Dismiss message" onClick={() => setArchitectureNotice('')}>×</button>
+          </div>
+        )}
         <div className={`architecture-workbench ${result.changes?.review ? 'reviewing' : ''}`}>
           <nav className="component-index" aria-label="Components">
             <div className="index-heading"><h1>Components</h1></div>

@@ -478,12 +478,17 @@ describe('App', () => {
   })
 
   it('keeps the current workspace when backend-held changes block project switching', async () => {
+    const review = {
+      diff: 'diff --git a/components/worker.md b/components/worker.md\n+# Worker\n',
+      base_revision: '8'.repeat(40), candidate_tree: '9'.repeat(40), generation: 2,
+    }
     const pending = {
       source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: '8'.repeat(40),
       component_count: 0, component_titles: [], components: [],
-      changes: { valid: true, components: [{ id: 'worker', title: 'Worker', description: '', new: true }] },
+      changes: { valid: true, components: [{ id: 'worker', title: 'Worker', description: '', new: true }], review },
     }
-    const fetchMock = mockResponses([pending, { ...pending, action_error: 'pending_blocks_switch' }], [200, 409])
+    const blocked = { ...pending, action_error: 'pending_blocks_switch' }
+    const fetchMock = mockResponses([pending, blocked, blocked], [200, 409, 409])
     render(<App />)
     await submitPath('/tmp/example')
     const user = userEvent.setup()
@@ -495,8 +500,20 @@ describe('App', () => {
     expect(notice.parentElement).toHaveClass('workspace-shell')
     expect(notice.nextElementSibling).toHaveClass('architecture-workbench')
     expect(screen.getByText('Worker')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Update architecture' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Discard changes' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Open a project' })).not.toBeInTheDocument()
     expect(requestPath(fetchMock, 1)).toBe('/api/projects/leave')
+
+    await user.click(screen.getByRole('button', { name: 'Dismiss message' }))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Update architecture' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Discard changes' })).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    await user.click(screen.getByRole('button', { name: 'Open another project' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Keep working here or discard these changes before opening another project.')
+    expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
   it('restores backend-held changes when opening another project is blocked after a browser reload', async () => {
