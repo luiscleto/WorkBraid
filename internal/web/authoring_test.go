@@ -271,12 +271,9 @@ func TestComponentMutationsEnforceOriginAndLoadedProject(t *testing.T) {
 		t.Fatalf("create pending response status=%d body=%s", created.Code, created.Body.String())
 	}
 	otherSource := createSourceRepository(t)
-	if other := postInitializeProject(t, handler, testOrigin, otherSource); other.Code != http.StatusOK {
-		t.Fatalf("initialize other project status=%d body=%s", other.Code, other.Body.String())
-	}
 	payload.SourceRoot = filepath.Clean(otherSource)
 	otherMutation := postComponentMutation(t, handler, testOrigin, "/api/architecture/components/add", payload)
-	if otherMutation.Code != http.StatusConflict || !strings.Contains(otherMutation.Body.String(), errorChangesElsewhere) {
+	if otherMutation.Code != http.StatusConflict || !strings.Contains(otherMutation.Body.String(), errorArchitectureNotOpen) {
 		t.Fatalf("other-store mutation status=%d body=%s", otherMutation.Code, otherMutation.Body.String())
 	}
 	reopened := decodeArchitectureResponse(t, postOpenProject(t, handler, testOrigin, source))

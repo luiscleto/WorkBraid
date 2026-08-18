@@ -80,18 +80,37 @@ func (snapshot Snapshot) ComponentTitles() []string {
 // AuthoringComponent is the structured projection used by the local browser.
 // Canonical Markdown interpretation remains owned by the accepted loader.
 type AuthoringComponent struct {
-	ID          string
-	Title       string
-	Description string
+	ID            string
+	Title         string
+	Description   string
+	Filename      string
+	Relationships []AuthoringRelationship
+}
+
+// AuthoringRelationship is the accepted browser projection of an authored
+// outgoing relationship. Its slice order is retained for faithful
+// representation only and has no domain meaning.
+type AuthoringRelationship struct {
+	TargetID string
+	Label    string
 }
 
 func (snapshot Snapshot) AuthoringComponents() []AuthoringComponent {
 	components := make([]AuthoringComponent, len(snapshot.components))
 	for index := range snapshot.components {
+		relationships := make([]AuthoringRelationship, len(snapshot.components[index].relationships))
+		for relationshipIndex, relationship := range snapshot.components[index].relationships {
+			relationships[relationshipIndex] = AuthoringRelationship{
+				TargetID: relationship.target.String(),
+				Label:    relationship.label,
+			}
+		}
 		components[index] = AuthoringComponent{
-			ID:          snapshot.components[index].id.String(),
-			Title:       snapshot.components[index].title,
-			Description: string(snapshot.components[index].body),
+			ID:            snapshot.components[index].id.String(),
+			Title:         snapshot.components[index].title,
+			Description:   string(snapshot.components[index].body),
+			Filename:      filepath.Base(snapshot.components[index].path),
+			Relationships: relationships,
 		}
 	}
 	return components

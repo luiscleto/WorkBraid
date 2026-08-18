@@ -1,4 +1,6 @@
-import { FormEvent, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useState } from 'react'
+import { ArchitectureMap } from './ArchitectureMap'
+import { MarkdownBody } from './MarkdownBody'
 
 type Inspection = {
   source_root: string
@@ -24,6 +26,8 @@ type AuthoringComponent = {
   id: string
   title: string
   description: string
+  filename: string
+  relationships: { target_id: string; label: string }[]
 }
 
 type PendingComponent = AuthoringComponent & { new: boolean }
@@ -51,7 +55,16 @@ type ComponentEditor = {
   description: string
   titleChanged: boolean
   descriptionChanged: boolean
+  initialTitle: string
+  initialDescription: string
 }
+
+type WorkspaceTask = 'documentation' | 'changes' | 'empty'
+
+type NavigationIntent =
+  | { kind: 'component'; id: string }
+  | { kind: 'changes' }
+  | { kind: 'open-another' }
 
 type ErrorCode =
   | 'path_required'
@@ -86,6 +99,22 @@ export function App() {
   const [architectureNotice, setArchitectureNotice] = useState('')
   const [architectureBusy, setArchitectureBusy] = useState(false)
   const [acceptanceUnknown, setAcceptanceUnknown] = useState(false)
+  const [selectedComponentID, setSelectedComponentID] = useState<string>()
+  const [workspaceTask, setWorkspaceTask] = useState<WorkspaceTask>('empty')
+  const [navigationIntent, setNavigationIntent] = useState<NavigationIntent | null>(null)
+  const [discardConfirming, setDiscardConfirming] = useState(false)
+
+  const enterWorkspace = useCallback((result: ArchitectureResult, task?: WorkspaceTask) => {
+    setState({ kind: 'ready', value: result })
+    setSelectedComponentID((current) => result.components?.some((component) => component.id === current) ? current : result.components?.[0]?.id)
+    setWorkspaceTask(task ?? (result.changes?.components.length ? 'changes' : result.components?.length ? 'documentation' : 'empty'))
+  }, [])
+
+  useEffect(() => {
+    if (state.kind !== 'ready') return
+    if (selectedComponentID && state.value.components?.some((component) => component.id === selectedComponentID)) return
+    setSelectedComponentID(state.value.components?.[0]?.id)
+  }, [state, selectedComponentID])
 
   async function inspectProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -110,7 +139,7 @@ export function App() {
       if ('state' in result) {
         setEditor(null)
         setAuthoringError('')
-        setState({ kind: 'ready', value: result as ArchitectureResult })
+        enterWorkspace(result as ArchitectureResult)
       } else {
         setState({ kind: 'inspection', value: result as Inspection })
       }
@@ -129,12 +158,19 @@ export function App() {
       description: pending?.description ?? component.description,
       titleChanged: false,
       descriptionChanged: false,
+      initialTitle: pending?.title ?? component.title,
+      initialDescription: pending?.description ?? component.description,
     })
+    setWorkspaceTask('documentation')
   }
 
   function editPending(component: PendingComponent) {
     setAuthoringError('')
-    setEditor({ kind: 'edit', id: component.id, title: component.title, description: component.description, titleChanged: false, descriptionChanged: false })
+    setEditor({
+      kind: 'edit', id: component.id, title: component.title, description: component.description,
+      titleChanged: false, descriptionChanged: false, initialTitle: component.title, initialDescription: component.description,
+    })
+    setWorkspaceTask('changes')
   }
 
   async function submitComponent(event: FormEvent<HTMLFormElement>, result: ArchitectureResult) {
@@ -155,7 +191,7 @@ export function App() {
         setAuthoringError(messageForAuthoringError('code' in payload ? payload.code : undefined))
         return
       }
-      setState({ kind: 'ready', value: payload })
+      enterWorkspace(payload, 'changes')
       setEditor(null)
     } catch {
       setAuthoringError("WorkBraid couldn't keep that change. Try again.")
@@ -175,7 +211,7 @@ export function App() {
         })
         return
       }
-      setState({ kind: 'ready', value: result as ArchitectureResult })
+      enterWorkspace(result as ArchitectureResult)
     } catch {
       setState({ kind: 'setup-error', inspection })
     }
@@ -189,7 +225,7 @@ export function App() {
       const payload = (await response.json()) as ArchitectureResult | ErrorPayload
       if ('state' in payload) {
         setAcceptanceUnknown(false)
-        setState({ kind: 'ready', value: payload })
+        enterWorkspace(payload, 'changes')
       } else {
         setArchitectureNotice(messageForArchitectureAction('code' in payload ? payload.code : undefined))
       }
@@ -206,10 +242,7 @@ export function App() {
     setArchitectureBusy(true)
     setArchitectureNotice('')
     setAcceptanceUnknown(true)
-    setState({
-      kind: 'ready',
-      value: { ...result, changes: result.changes ? { ...result.changes, review: undefined } : undefined },
-    })
+    enterWorkspace({ ...result, changes: result.changes ? { ...result.changes, review: undefined } : undefined }, 'changes')
     try {
       const response = await postJSON('/api/architecture/accept', {
         source_root: result.source_root,
@@ -220,7 +253,7 @@ export function App() {
       const payload = (await response.json()) as ArchitectureResult | ErrorPayload
       if ('state' in payload) {
         setAcceptanceUnknown(false)
-        setState({ kind: 'ready', value: payload })
+        enterWorkspace(payload, payload.changes ? 'changes' : 'documentation')
       } else {
         setArchitectureNotice('WorkBraid could not confirm what happened. Open this project again to check its current architecture.')
       }
@@ -232,6 +265,194 @@ export function App() {
   }
 
   const busy = state.kind === 'looking' || state.kind === 'setting-up'
+
+  const editorDirty = editor !== null && (editor.title !== editor.initialTitle || editor.description !== editor.initialDescription)
+
+  function requestNavigation(intent: NavigationIntent) {
+    if (editorDirty) {
+      setNavigationIntent(intent)
+      return
+    }
+    void performNavigation(intent)
+  }
+
+  async function performNavigation(intent: NavigationIntent) {
+    setNavigationIntent(null)
+    setEditor(null)
+    setAuthoringError('')
+    setArchitectureNotice('')
+    if (intent.kind === 'component') {
+      setSelectedComponentID(intent.id)
+      setWorkspaceTask('documentation')
+      return
+    }
+    if (intent.kind === 'changes') {
+      setWorkspaceTask('changes')
+      return
+    }
+    if (state.kind !== 'ready') return
+    setArchitectureBusy(true)
+    setArchitectureNotice('')
+    try {
+      const response = await postJSON('/api/projects/leave', { source_root: state.value.source_root })
+      if (response.ok) {
+        setState({ kind: 'idle' })
+        setSourceRoot('')
+        setSelectedComponentID(undefined)
+        setWorkspaceTask('empty')
+        return
+      }
+      const payload = (await response.json()) as ArchitectureResult | ErrorPayload
+      if ('state' in payload) {
+        enterWorkspace({ ...payload, action_error: undefined }, 'changes')
+        setArchitectureNotice('Keep working here or discard these changes before opening another project.')
+      } else {
+        setArchitectureNotice("WorkBraid couldn't leave this project. Try again.")
+      }
+    } catch {
+      setArchitectureNotice("WorkBraid couldn't leave this project. Try again.")
+    } finally {
+      setArchitectureBusy(false)
+    }
+  }
+
+  async function discardChanges(result: ArchitectureResult) {
+    setArchitectureBusy(true)
+    setArchitectureNotice('')
+    try {
+      const response = await postJSON('/api/architecture/discard', { source_root: result.source_root })
+      const payload = (await response.json()) as ArchitectureResult | ErrorPayload
+      if (!response.ok || !('state' in payload)) {
+        setArchitectureNotice("WorkBraid couldn't discard these changes. Try again.")
+        return
+      }
+      setDiscardConfirming(false)
+      enterWorkspace(payload, payload.components?.length ? 'documentation' : 'empty')
+    } catch {
+      setArchitectureNotice("WorkBraid couldn't discard these changes. Try again.")
+    } finally {
+      setArchitectureBusy(false)
+    }
+  }
+
+  if (state.kind === 'ready') {
+    const result = state.value
+    const selected = result.components?.find((component) => component.id === selectedComponentID)
+    const titleCounts = new Map<string, number>()
+    for (const component of result.components ?? []) titleCounts.set(component.title, (titleCounts.get(component.title) ?? 0) + 1)
+    return (
+      <main className="workspace-shell">
+        <header className="application-frame">
+          <div>
+            <p className="eyebrow">WorkBraid</p>
+            <p className="workspace-context"><strong>{result.project_name}</strong><span>Architecture</span></p>
+          </div>
+          <div className="frame-actions">
+            {result.changes?.components.length ? (
+              <button className="text-action" type="button" onClick={() => requestNavigation({ kind: 'changes' })}>
+                Changes in progress <span className="change-count">{result.changes.components.length}</span>
+              </button>
+            ) : null}
+            <button className="text-action" type="button" disabled={architectureBusy || acceptanceUnknown} onClick={() => requestNavigation({ kind: 'open-another' })}>
+              Open another project
+            </button>
+          </div>
+        </header>
+        {result.stale && <div className="stale-banner" role="alert">This view is out of date. Changes in progress remain tied to the architecture they started from.</div>}
+        <div className={`architecture-workbench ${result.changes?.review ? 'reviewing' : ''}`}>
+          <nav className="component-index" aria-label="Components">
+            <div className="index-heading"><h1>Components</h1></div>
+            {result.components?.length ? (
+              <ul>
+                {result.components.map((component) => (
+                  <li key={component.id}>
+                    <button
+                      type="button"
+                      className={component.id === selectedComponentID && workspaceTask === 'documentation' && !editor ? 'selected' : ''}
+                      aria-label={(titleCounts.get(component.title) ?? 0) > 1 ? `${component.title}, ${component.filename || component.id.slice(0, 8)}` : undefined}
+                      aria-current={component.id === selectedComponentID && workspaceTask === 'documentation' && !editor ? 'page' : undefined}
+                      onClick={() => requestNavigation({ kind: 'component', id: component.id })}
+                    >
+                      <span>{component.title}</span>
+                      {(titleCounts.get(component.title) ?? 0) > 1 && <small>{' '}{component.filename || component.id.slice(0, 8)}</small>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="index-empty">No components</p>}
+            {!result.stale && !acceptanceUnknown && (
+              <button className="index-add" type="button" onClick={() => {
+                setAuthoringError('')
+                setEditor({
+                  kind: 'add', title: '', description: '', titleChanged: false, descriptionChanged: false,
+                  initialTitle: '', initialDescription: '',
+                })
+              }}>Add component</button>
+            )}
+          </nav>
+          <section className="map-region">
+            <div className="region-label">Architecture map</div>
+            <ArchitectureMap
+              revision={result.revision}
+              components={result.components ?? []}
+              selectedID={selectedComponentID}
+              onSelect={(id) => requestNavigation({ kind: 'component', id })}
+            />
+          </section>
+          <aside className="working-pane" aria-label="Architecture task">
+            {architectureNotice && <p className="workspace-notice" role="alert">{architectureNotice}</p>}
+            {editor ? (
+              <ComponentEditorForm
+                editor={editor}
+                setEditor={setEditor}
+                error={authoringError}
+                onCancel={() => setEditor(null)}
+                onSubmit={(event) => submitComponent(event, result)}
+              />
+            ) : workspaceTask === 'changes' && result.changes ? (
+              <ChangesTask
+                result={result}
+                busy={architectureBusy}
+                acceptanceUnknown={acceptanceUnknown}
+                discardConfirming={discardConfirming}
+                onEdit={editPending}
+                onReview={() => reviewChanges(result)}
+                onUpdate={() => updateArchitecture(result)}
+                onBeginDiscard={() => setDiscardConfirming(true)}
+                onCancelDiscard={() => setDiscardConfirming(false)}
+                onDiscard={() => discardChanges(result)}
+              />
+            ) : selected ? (
+              <article className="component-documentation">
+                <div className="pane-heading"><p className="eyebrow">Component</p><h2>{selected.title}</h2></div>
+                <MarkdownBody source={selected.description} />
+                {!result.stale && !acceptanceUnknown && <button className="inline-action" type="button" onClick={() => editAccepted(selected, result)}>Edit component</button>}
+              </article>
+            ) : (
+              <div className="workspace-empty"><p className="eyebrow">Architecture</p><h2>Start with a component</h2><p>Add the first part of this architecture to begin the map.</p></div>
+            )}
+            <details className="technical-details">
+              <summary>Technical details</summary>
+              <dl><dt>Folder</dt><dd>{result.source_root}</dd><dt>Revision</dt><dd>{result.revision}</dd></dl>
+              {result.parent_diff && <div className="accepted-diff"><h3>Parent diff</h3><pre>{result.parent_diff}</pre></div>}
+            </details>
+          </aside>
+        </div>
+        {navigationIntent && (
+          <div className="navigation-guard" role="dialog" aria-modal="true" aria-labelledby="unsaved-heading">
+            <div>
+              <h2 id="unsaved-heading">Leave without keeping?</h2>
+              <p>Your latest Title or Description edits have not been kept.</p>
+              <div className="button-group">
+                <button className="secondary-action" type="button" onClick={() => setNavigationIntent(null)}>Keep editing</button>
+                <button className="destructive-action" type="button" onClick={() => performNavigation(navigationIntent)}>Leave without keeping</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+    )
+  }
 
   return (
     <main className="shell">
@@ -307,139 +528,6 @@ export function App() {
               </div>
             )}
             {state.kind === 'setting-up' && <p className="lookup-status">Setting up architecture…</p>}
-            {state.kind === 'ready' && (
-              <div className="message">
-                <h2>{state.value.stale ? 'Architecture changed' : 'Architecture ready'}</h2>
-                {state.value.stale && <p>This view is out of date. Changes in progress are shown against the architecture they started from.</p>}
-                {state.value.action_error && !state.value.changes && (
-                  <p className="review-error" role="alert">{messageForArchitectureAction(state.value.action_error)}</p>
-                )}
-                {architectureNotice && <p className="review-error" role="alert">{architectureNotice}</p>}
-                {state.value.component_count === 0 ? (
-                  <p>This project has an empty architecture.</p>
-                ) : (
-                  <div className="component-inventory accepted-components">
-                    <p>
-                      This architecture has {state.value.component_count}{' '}
-                      {state.value.component_count === 1 ? 'component' : 'components'}.
-                    </p>
-                    <ul>
-                      {(state.value.components ?? []).map((component) => (
-                        <li key={component.id}>
-                          <span>{component.title}</span>
-                          {!state.value.stale && !acceptanceUnknown && (
-                            <button className="text-action" type="button" onClick={() => editAccepted(component, state.value)}>Edit</button>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-                {!state.value.stale && !acceptanceUnknown && <div className="authoring-actions">
-                  <button
-                    className="inline-action"
-                    type="button"
-                    onClick={() => {
-                      setAuthoringError('')
-                      setEditor({ kind: 'add', title: '', description: '', titleChanged: false, descriptionChanged: false })
-                    }}
-                  >
-                    Add component
-                  </button>
-                </div>}
-                {state.value.changes && state.value.changes.components.length > 0 && (
-                  <section className="changes-in-progress" aria-labelledby="changes-heading">
-                    <h3 id="changes-heading">Changes in progress</h3>
-                    <p>These changes have not updated the architecture yet.</p>
-                    <ul>
-                      {state.value.changes.components.map((component) => (
-                        <li key={component.id}>
-                          <span>{component.title.trim() || 'Untitled component'}</span>
-                          {!state.value.stale && !acceptanceUnknown && (
-                            <button className="text-action" type="button" onClick={() => editPending(component)}>Edit</button>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                    {state.value.changes.review_blocker && (
-                      <p className="review-error" role="alert">{messageForReviewBlocker(state.value.changes.review_blocker)}</p>
-                    )}
-                    {state.value.action_error && !state.value.changes.review_blocker && (
-                      <p className="review-error" role="alert">{messageForArchitectureAction(state.value.action_error)}</p>
-                    )}
-                    {!state.value.stale && !state.value.changes.review && !acceptanceUnknown && (
-                      <button className="inline-action review-action" type="button" disabled={architectureBusy} onClick={() => reviewChanges(state.value)}>
-                        {architectureBusy ? 'Preparing…' : 'Review changes'}
-                      </button>
-                    )}
-                    {state.value.changes.review && !state.value.stale && (
-                      <section className="change-review" aria-labelledby="review-heading">
-                        <h3 id="review-heading">Review changes</h3>
-                        <p>Inspect the complete change before updating the architecture; backslashes and non-printing characters use escaped notation.</p>
-                        <pre>{state.value.changes.review.diff}</pre>
-                        <details>
-                          <summary>Review details</summary>
-                          <dl>
-                            <dt>Base revision</dt><dd>{state.value.changes.review.base_revision}</dd>
-                            <dt>Candidate tree</dt><dd>{state.value.changes.review.candidate_tree}</dd>
-                            <dt>Change version</dt><dd>{state.value.changes.review.generation}</dd>
-                          </dl>
-                        </details>
-                        <button className="inline-action review-action" type="button" disabled={architectureBusy} onClick={() => updateArchitecture(state.value)}>
-                          {architectureBusy ? 'Updating…' : 'Update architecture'}
-                        </button>
-                      </section>
-                    )}
-                  </section>
-                )}
-                {editor && (
-                  <form className="component-form" onSubmit={(event) => submitComponent(event, state.value)}>
-                    <h3>{editor.kind === 'add' ? 'Add component' : 'Edit component'}</h3>
-                    <label htmlFor="component-title">Title</label>
-                    <input
-                      id="component-title"
-                      value={editor.title}
-                      onChange={(event) => setEditor({ ...editor, title: event.target.value, titleChanged: true })}
-                      autoComplete="off"
-                    />
-                    <label htmlFor="component-description">Description</label>
-                    <textarea
-                      id="component-description"
-                      value={editor.description}
-                      onChange={(event) => setEditor({ ...editor, description: event.target.value, descriptionChanged: true })}
-                      rows={8}
-                    />
-                    {authoringError && (
-                      <p className="authoring-error" role="alert">
-                        {authoringError}
-                      </p>
-                    )}
-                    <div className="button-group">
-                      <button className="secondary-action" type="button" onClick={() => setEditor(null)}>
-                        Cancel
-                      </button>
-                      <button className="inline-action" type="submit">
-                        Keep change
-                      </button>
-                    </div>
-                  </form>
-                )}
-                <FolderPath path={state.value.source_root} />
-                <details>
-                  <summary>Technical details</summary>
-                  <dl>
-                    <dt>Revision</dt>
-                    <dd>{state.value.revision}</dd>
-                  </dl>
-                  {state.value.parent_diff && (
-                    <div className="accepted-diff">
-                      <h3>Parent diff</h3>
-                      <pre>{state.value.parent_diff}</pre>
-                    </div>
-                  )}
-                </details>
-              </div>
-            )}
             {state.kind === 'setup-error' && (
               <SetupError state={state} onRetry={() => setupArchitecture(state.inspection)} />
             )}
@@ -448,6 +536,118 @@ export function App() {
         )}
       </article>
     </main>
+  )
+}
+
+function ComponentEditorForm({
+  editor,
+  setEditor,
+  error,
+  onCancel,
+  onSubmit,
+}: {
+  editor: ComponentEditor
+  setEditor: (editor: ComponentEditor) => void
+  error: string
+  onCancel: () => void
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void
+}) {
+  return (
+    <form className="component-form" onSubmit={onSubmit}>
+      <div className="pane-heading"><p className="eyebrow">Architecture</p><h2>{editor.kind === 'add' ? 'Add component' : 'Edit component'}</h2></div>
+      <label htmlFor="component-title">Title</label>
+      <input
+        id="component-title"
+        value={editor.title}
+        onChange={(event) => setEditor({ ...editor, title: event.target.value, titleChanged: true })}
+        autoComplete="off"
+      />
+      <label htmlFor="component-description">Description</label>
+      <textarea
+        id="component-description"
+        value={editor.description}
+        onChange={(event) => setEditor({ ...editor, description: event.target.value, descriptionChanged: true })}
+        rows={14}
+      />
+      {error && <p className="authoring-error" role="alert">{error}</p>}
+      <div className="button-group">
+        <button className="secondary-action" type="button" onClick={onCancel}>Cancel</button>
+        <button className="inline-action" type="submit">Keep change</button>
+      </div>
+    </form>
+  )
+}
+
+function ChangesTask({
+  result,
+  busy,
+  acceptanceUnknown,
+  discardConfirming,
+  onEdit,
+  onReview,
+  onUpdate,
+  onBeginDiscard,
+  onCancelDiscard,
+  onDiscard,
+}: {
+  result: ArchitectureResult
+  busy: boolean
+  acceptanceUnknown: boolean
+  discardConfirming: boolean
+  onEdit: (component: PendingComponent) => void
+  onReview: () => void
+  onUpdate: () => void
+  onBeginDiscard: () => void
+  onCancelDiscard: () => void
+  onDiscard: () => void
+}) {
+  const changes = result.changes
+  if (!changes) return null
+  return (
+    <section className="changes-in-progress" aria-labelledby="changes-heading">
+      <div className="pane-heading"><p className="eyebrow">Architecture</p><h2 id="changes-heading">Changes in progress</h2></div>
+      <p>These changes have not updated the architecture yet.</p>
+      <ul>
+        {changes.components.map((component) => (
+          <li key={component.id}>
+            <span>{component.title.trim() || 'Untitled component'}</span>
+            {!result.stale && !acceptanceUnknown && <button className="text-action" type="button" onClick={() => onEdit(component)}>Edit</button>}
+          </li>
+        ))}
+      </ul>
+      {changes.review_blocker && <p className="review-error" role="alert">{messageForReviewBlocker(changes.review_blocker)}</p>}
+      {result.action_error && !changes.review_blocker && <p className="review-error" role="alert">{messageForArchitectureAction(result.action_error)}</p>}
+      {!result.stale && !changes.review && !acceptanceUnknown && (
+        <button className="inline-action review-action" type="button" disabled={busy} onClick={onReview}>{busy ? 'Preparing…' : 'Review changes'}</button>
+      )}
+      {changes.review && !result.stale && (
+        <section className="change-review" aria-labelledby="review-heading">
+          <h3 id="review-heading">Review changes</h3>
+          <p>Inspect the complete change before updating the architecture; backslashes and non-printing characters use escaped notation.</p>
+          <pre>{changes.review.diff}</pre>
+          <details>
+            <summary>Review details</summary>
+            <dl>
+              <dt>Base revision</dt><dd>{changes.review.base_revision}</dd>
+              <dt>Candidate tree</dt><dd>{changes.review.candidate_tree}</dd>
+              <dt>Change version</dt><dd>{changes.review.generation}</dd>
+            </dl>
+          </details>
+          <button className="inline-action review-action" type="button" disabled={busy} onClick={onUpdate}>{busy ? 'Updating…' : 'Update architecture'}</button>
+        </section>
+      )}
+      {!acceptanceUnknown && <div className="discard-area">
+        {discardConfirming ? (
+          <div className="discard-confirmation" role="alert">
+            <p>Discard every change in progress?</p>
+            <div className="button-group">
+              <button className="secondary-action" type="button" onClick={onCancelDiscard}>Keep changes</button>
+              <button className="destructive-action" type="button" disabled={busy} onClick={onDiscard}>Discard changes</button>
+            </div>
+          </div>
+        ) : <button className="text-action destructive-text" type="button" onClick={onBeginDiscard}>Discard changes</button>}
+      </div>}
+    </section>
   )
 }
 

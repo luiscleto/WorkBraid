@@ -1,7 +1,25 @@
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { act, cleanup, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
+
+const graphHarness = vi.hoisted(() => ({
+  calls: [] as Array<{ elements?: unknown[] }>,
+  select: undefined as undefined | ((event: { target: { id: () => string } }) => void),
+}))
+
+vi.mock('cytoscape', () => ({
+  default: (options: { elements?: unknown[] }) => {
+    graphHarness.calls.push(options)
+    return {
+      on: (_event: string, _selector: string, callback: typeof graphHarness.select) => { graphHarness.select = callback },
+      destroy: () => undefined,
+      fit: () => undefined,
+      $: () => ({ unselect: () => undefined }),
+      getElementById: () => ({ select: () => undefined }),
+    }
+  },
+}))
 
 const unlinkedProject = {
   source_root: '/tmp/example',
@@ -13,6 +31,8 @@ describe('App', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
+    graphHarness.calls.length = 0
+    graphHarness.select = undefined
   })
 
   it('keeps the idle screen to one sheet without empty result chrome', () => {
@@ -68,8 +88,9 @@ describe('App', () => {
     await user.click(await screen.findByRole('button', { name: 'Set up architecture' }))
     await user.click(screen.getByRole('button', { name: 'Set up' }))
 
-    expect(await screen.findByRole('heading', { name: 'Architecture ready' })).toBeInTheDocument()
-    expect(screen.getByText('This project has an empty architecture.')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Start with a component' })).toBeInTheDocument()
+    expect(screen.getByText('The architecture has no components yet.')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Open a project' })).not.toBeInTheDocument()
     const details = screen.getByText('Technical details').closest('details')
     expect(details).not.toHaveAttribute('open')
     expect(within(details as HTMLElement).getByText(revision)).toBeInTheDocument()
@@ -85,7 +106,7 @@ describe('App', () => {
     render(<App />)
     await submitPath('/tmp/example')
 
-    expect(await screen.findByRole('heading', { name: 'Architecture ready' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Start with a component' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Set up architecture?' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /set up|retry|repair|reset/i })).not.toBeInTheDocument()
     expect(within(screen.getByText('Technical details').closest('details') as HTMLElement).getByText(revision)).toBeInTheDocument()
@@ -111,13 +132,12 @@ describe('App', () => {
     render(<App />)
     await submitPath('/tmp/example')
 
-    expect(await screen.findByRole('heading', { name: 'Architecture ready' })).toBeInTheDocument()
-    expect(screen.getByText('This architecture has 3 components.')).toBeInTheDocument()
-    expect(screen.getAllByRole('listitem').map((item) => item.querySelector('span')?.textContent)).toEqual(['API', 'Worker', 'API'])
+    const index = await screen.findByRole('navigation', { name: 'Components' })
+    expect(within(index).getAllByRole('listitem').map((item) => item.querySelector('span')?.textContent)).toEqual(['API', 'Worker', 'API'])
     expect(screen.queryByText('This project has an empty architecture.')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add component' })).toBeInTheDocument()
-    expect(screen.getAllByRole('button', { name: 'Edit' })).toHaveLength(3)
-    expect(screen.queryByRole('button', { name: /relationship|map|repair/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit component' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Fit map' })).toBeInTheDocument()
     expect(screen.queryByText(/markdown|frontmatter|uuid|filename|relationship/i)).not.toBeInTheDocument()
     const details = screen.getByText('Technical details').closest('details')
     expect(details).not.toHaveAttribute('open')
@@ -152,7 +172,7 @@ describe('App', () => {
     await submitPath('/tmp/example')
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+    await user.click(await screen.findByRole('button', { name: 'Edit component' }))
     await user.clear(screen.getByLabelText('Title'))
     await user.type(screen.getByLabelText('Title'), 'Gateway')
     await user.clear(screen.getByLabelText('Description'))
@@ -161,7 +181,7 @@ describe('App', () => {
 
     expect(await screen.findByRole('heading', { name: 'Changes in progress' })).toBeInTheDocument()
     expect(screen.getByText('These changes have not updated the architecture yet.')).toBeInTheDocument()
-    expect(screen.getByText('API')).toBeInTheDocument()
+    expect(within(screen.getByRole('navigation', { name: 'Components' })).getByText('API')).toBeInTheDocument()
     expect(screen.getByText('Gateway')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Add component' }))
@@ -170,13 +190,15 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Keep change' }))
 
     expect(await screen.findByText('Worker')).toBeInTheDocument()
-    expect(screen.getAllByRole('listitem')).toHaveLength(3)
+    expect(within(screen.getByRole('heading', { name: 'Changes in progress' }).closest('section') as HTMLElement).getAllByRole('listitem')).toHaveLength(2)
     expect(requestPath(fetchMock, 1)).toBe('/api/architecture/components/edit')
     expect(requestBody(fetchMock, 1)).toEqual({
       source_root: '/tmp/example', component_id: 'api-id', title: 'Gateway', description: '\nChanged body\n',
       title_changed: true, description_changed: true,
     })
     expect(requestPath(fetchMock, 2)).toBe('/api/architecture/components/add')
+    expect(graphHarness.calls).toHaveLength(1)
+    expect(graphHarness.calls[0].elements).toEqual([{ data: { id: 'api-id', label: 'API' } }])
   })
 
   it('sends explicit title-only intent without an untouched CRLF description', async () => {
@@ -197,7 +219,7 @@ describe('App', () => {
     await submitPath('/tmp/example')
 
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+    await user.click(await screen.findByRole('button', { name: 'Edit component' }))
     await user.clear(screen.getByLabelText('Title'))
     await user.type(screen.getByLabelText('Title'), 'Gateway')
     await user.click(screen.getByRole('button', { name: 'Keep change' }))
@@ -327,7 +349,7 @@ describe('App', () => {
     expect(within(reviewDetails).getByText(candidate)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Update architecture' }))
 
-    expect(await screen.findByText('This architecture has 1 component.')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Worker' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Changes in progress' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Update architecture' })).not.toBeInTheDocument()
     const technicalDetails = screen.getByText('Technical details').closest('details') as HTMLElement
@@ -372,12 +394,137 @@ describe('App', () => {
     render(<App />)
     await submitPath('/tmp/example')
 
-    expect(await screen.findByRole('heading', { name: 'Architecture changed' })).toBeInTheDocument()
-    expect(screen.getByText('This view is out of date. Changes in progress are shown against the architecture they started from.')).toBeInTheDocument()
-    expect(screen.getByRole('alert')).toHaveTextContent('These changes are out of date because the architecture changed.')
+    const alerts = await screen.findAllByRole('alert')
+    expect(alerts.some((alert) => alert.textContent?.includes('This view is out of date.'))).toBe(true)
+    expect(alerts.some((alert) => alert.textContent?.includes('These changes are out of date because the architecture changed.'))).toBe(true)
     expect(screen.getByText('Public Gateway')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /edit|add component|review changes|update architecture/i })).not.toBeInTheDocument()
     expect(screen.queryByText(/merge|rebase|overwrite|repair/i)).not.toBeInTheDocument()
+  })
+
+  it('uses stable identities for accepted index and map projection with collision-only context', async () => {
+    mockResponses([{
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: '7'.repeat(40),
+      component_count: 3, component_titles: ['Gateway', 'Gateway', 'Worker'],
+      components: [
+        { id: 'gateway-a', title: 'Gateway', filename: 'public.md', description: 'Public body.\n', relationships: [{ target_id: 'worker', label: 'calls' }] },
+        { id: 'gateway-b', title: 'Gateway', filename: 'private.md', description: 'Private body.\n', relationships: [{ target_id: 'worker', label: 'reads from' }] },
+        { id: 'worker', title: 'Worker', filename: 'worker.md', description: 'Worker body.\n', relationships: [] },
+      ],
+    }])
+    render(<App />)
+    await submitPath('/tmp/example')
+
+    const index = await screen.findByRole('navigation', { name: 'Components' })
+    expect(within(index).getByRole('button', { name: 'Gateway, public.md' })).toBeInTheDocument()
+    expect(within(index).getByRole('button', { name: 'Gateway, private.md' })).toBeInTheDocument()
+    expect(within(index).getByRole('button', { name: 'Worker' })).toBeInTheDocument()
+    expect(within(index).queryByText('worker.md')).not.toBeInTheDocument()
+    expect(screen.getByText('Public body.')).toBeInTheDocument()
+
+    const user = userEvent.setup()
+    await user.click(within(index).getByRole('button', { name: 'Gateway, private.md' }))
+    expect(screen.getByText('Private body.')).toBeInTheDocument()
+    expect(graphHarness.calls.at(-1)?.elements).toHaveLength(5)
+
+    act(() => graphHarness.select?.({ target: { id: () => 'worker' } }))
+    expect(screen.getByRole('heading', { name: 'Worker' })).toBeInTheDocument()
+    expect(screen.getByText('Worker body.')).toBeInTheDocument()
+  })
+
+  it('requires confirmation and discards the whole backend-held change set through one action', async () => {
+    const pending = {
+      source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: '8'.repeat(40),
+      component_count: 0, component_titles: [], components: [],
+      changes: { valid: true, components: [{ id: 'worker', title: 'Worker', description: 'Body.\n', new: true }] },
+    }
+    const discarded = { ...pending, changes: undefined }
+    const fetchMock = mockResponses([pending, discarded])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'Discard changes' }))
+    expect(screen.getByText('Discard every change in progress?')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Discard changes' }))
+
+    expect(await screen.findByRole('heading', { name: 'Start with a component' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Changes in progress/ })).not.toBeInTheDocument()
+    expect(requestPath(fetchMock, 1)).toBe('/api/architecture/discard')
+    expect(requestBody(fetchMock, 1)).toEqual({ source_root: '/tmp/example' })
+  })
+
+  it('leaves the workspace for project opening only after backend eligibility succeeds', async () => {
+    const ready = {
+      source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: '8'.repeat(40),
+      component_count: 0, component_titles: [], components: [],
+    }
+    let call = 0
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      if (call++ === 0) return new Response(JSON.stringify(ready), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      return new Response(null, { status: 204 })
+    })
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Open another project' }))
+
+    expect(await screen.findByRole('heading', { name: 'Open a project' })).toBeInTheDocument()
+    expect(screen.queryByRole('navigation', { name: 'Components' })).not.toBeInTheDocument()
+    expect(requestPath(fetchMock, 1)).toBe('/api/projects/leave')
+  })
+
+  it('keeps the current workspace when backend-held changes block project switching', async () => {
+    const pending = {
+      source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: '8'.repeat(40),
+      component_count: 0, component_titles: [], components: [],
+      changes: { valid: true, components: [{ id: 'worker', title: 'Worker', description: '', new: true }] },
+    }
+    const fetchMock = mockResponses([pending, { ...pending, action_error: 'pending_blocks_switch' }], [200, 409])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Open another project' }))
+
+    expect(await screen.findByRole('heading', { name: 'Changes in progress' })).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Keep working here or discard these changes before opening another project.')
+    expect(screen.getByText('Worker')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Open a project' })).not.toBeInTheDocument()
+    expect(requestPath(fetchMock, 1)).toBe('/api/projects/leave')
+  })
+
+  it.each([
+    ['index selection', async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole('button', { name: 'Worker' }))],
+    ['map selection', async () => act(() => graphHarness.select?.({ target: { id: () => 'worker' } }))],
+    ['Changes in progress', async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole('button', { name: /Changes in progress/ }))],
+    ['Open another project', async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole('button', { name: 'Open another project' }))],
+  ])('guards dirty editor values before %s replaces the task', async (_label, navigate) => {
+    const workspace = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: '9'.repeat(40), component_count: 2,
+      component_titles: ['Gateway', 'Worker'],
+      components: [
+        { id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Accepted.\n', relationships: [] },
+        { id: 'worker', title: 'Worker', filename: 'worker.md', description: 'Works.\n', relationships: [] },
+      ],
+      changes: { valid: true, components: [{ id: 'gateway', title: 'Pending Gateway', description: 'Pending.\n', new: false }] },
+    }
+    mockResponses([workspace, { ...workspace, action_error: 'pending_blocks_switch' }], [200, 409])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    const pendingItem = screen.getByText('Pending Gateway').closest('li') as HTMLElement
+    await user.click(within(pendingItem).getByRole('button', { name: 'Edit' }))
+    await user.type(screen.getByLabelText('Title'), ' locally changed')
+
+    await navigate(user)
+    expect(screen.getByRole('dialog')).toHaveTextContent('Leave without keeping?')
+    await user.click(screen.getByRole('button', { name: 'Keep editing' }))
+    expect(screen.getByLabelText('Title')).toHaveValue('Pending Gateway locally changed')
+
+    await navigate(user)
+    await user.click(screen.getByRole('button', { name: 'Leave without keeping' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByDisplayValue('Pending Gateway locally changed')).not.toBeInTheDocument()
   })
 
   it('requires a fresh review when pending changes mutate after the displayed review', async () => {
@@ -437,6 +584,7 @@ describe('App', () => {
       expect(screen.queryByRole('button', { name: 'Update architecture' })).not.toBeInTheDocument()
       expect(screen.queryByRole('button', { name: 'Review changes' })).not.toBeInTheDocument()
       expect(screen.queryByRole('button', { name: /add component|edit/i })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Discard changes' })).not.toBeInTheDocument()
       expect(fetchMock).toHaveBeenCalledTimes(2)
       expect(requestBody(fetchMock, 1)).toEqual({
         source_root: '/tmp/example', base_revision: '1'.repeat(40), candidate_tree: '2'.repeat(40), generation: 1,
@@ -478,7 +626,7 @@ describe('App', () => {
     expect(alert).toHaveTextContent('Setup did not finish')
     expect(alert).toHaveTextContent('WorkBraid could not finish setting up architecture. Try again.')
     await user.click(screen.getByRole('button', { name: 'Retry' }))
-    expect(await screen.findByRole('heading', { name: 'Architecture ready' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Start with a component' })).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
@@ -497,7 +645,7 @@ describe('App', () => {
     finishSetup?.(new Response(JSON.stringify({
       source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: 'd'.repeat(40), component_count: 0,
     }), { status: 200 }))
-    expect(await screen.findByRole('heading', { name: 'Architecture ready' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Start with a component' })).toBeInTheDocument()
   })
 
   it('keeps implementation terminology out of normal setup copy', async () => {

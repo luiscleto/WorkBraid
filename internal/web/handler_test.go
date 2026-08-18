@@ -253,8 +253,9 @@ func TestNewApplicationInstanceReopensExactAcceptedComponents(t *testing.T) {
 	associationsBefore := snapshotAssociations(t, dbA)
 	openedA := postOpenProject(t, handlerA, testOrigin, repository)
 	assertComponentInventoryResponse(t, openedA, accepted, []string{"API", "Worker"})
-	if strings.Contains(openedA.Body.String(), "arbitrary api.md") {
-		t.Fatalf("component inventory exposed canonical filename: %s", openedA.Body.String())
+	openedBody := decodeArchitectureResponse(t, openedA)
+	if openedBody.Components[0].Filename != "arbitrary api.md" || len(openedBody.Components[0].Relationships) != 1 || openedBody.Components[0].Relationships[0].TargetID != workerID {
+		t.Fatalf("accepted projection omitted filename/relationships: %+v", openedBody.Components[0])
 	}
 	if after := snapshotPrivateArchitecture(t, dataDirectory); after != privateBefore {
 		t.Fatalf("component open changed private Architecture\nbefore:\n%s\nafter:\n%s", privateBefore, after)

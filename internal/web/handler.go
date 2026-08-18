@@ -94,6 +94,8 @@ func newHandler(db *sql.DB, expectedOrigin, uiDirectory, dataDirectory string) (
 	mux.HandleFunc("POST /api/architecture/components/edit", handler.editComponent)
 	mux.HandleFunc("POST /api/architecture/review", handler.reviewChanges)
 	mux.HandleFunc("POST /api/architecture/accept", handler.acceptChanges)
+	mux.HandleFunc("POST /api/architecture/discard", handler.discardChanges)
+	mux.HandleFunc("POST /api/projects/leave", handler.leaveProject)
 	mux.Handle("/", handler.staticFiles())
 	return handler, mux
 }
@@ -134,6 +136,7 @@ const (
 	errorUpdateFailed            = "update_failed"
 	errorUpdateUncertain         = "update_uncertain"
 	errorUpdatedReload           = "updated_reload"
+	errorPendingBlocksSwitch     = "pending_blocks_switch"
 )
 
 func (h *Handler) openProject(response http.ResponseWriter, request *http.Request) {
@@ -161,6 +164,18 @@ func (h *Handler) openProject(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	if !inspection.Known {
+		h.stateMutex.Lock()
+		if h.pending != nil && h.loadedProject != nil && h.loadedProject.sourceRoot != inspection.SourceRoot {
+			result := h.currentArchitectureResponseLocked()
+			result.ActionError = errorPendingBlocksSwitch
+			h.stateMutex.Unlock()
+			writeJSON(response, http.StatusConflict, result)
+			return
+		}
+		if h.loadedProject != nil && h.loadedProject.sourceRoot != inspection.SourceRoot {
+			h.clearLoadedProjectLocked()
+		}
+		h.stateMutex.Unlock()
 		writeJSON(response, http.StatusOK, inspection)
 		return
 	}
@@ -169,13 +184,21 @@ func (h *Handler) openProject(response http.ResponseWriter, request *http.Reques
 		return
 	}
 
+	h.stateMutex.Lock()
+	defer h.stateMutex.Unlock()
+	if h.pending != nil && h.loadedProject != nil && h.loadedProject.sourceRoot != inspection.SourceRoot {
+		result := h.currentArchitectureResponseLocked()
+		result.ActionError = errorPendingBlocksSwitch
+		writeJSON(response, http.StatusConflict, result)
+		return
+	}
 	snapshot, err := h.architecture.LoadAccepted(request.Context(), inspection.StoreID)
 	if err != nil {
 		writeArchitectureLoadError(response, err)
 		return
 	}
-	stalePending := h.publishSnapshot(inspection.SourceRoot, inspection.ProjectName, snapshot)
-	result := h.currentArchitectureResponse()
+	stalePending := h.publishSnapshotLocked(inspection.SourceRoot, inspection.ProjectName, snapshot)
+	result := h.currentArchitectureResponseLocked()
 	if stalePending {
 		result.ActionError = errorArchitectureStale
 	}
@@ -197,9 +220,16 @@ type architectureResponse struct {
 }
 
 type componentResponse struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
+	ID            string                 `json:"id"`
+	Title         string                 `json:"title"`
+	Description   string                 `json:"description"`
+	Filename      string                 `json:"filename"`
+	Relationships []relationshipResponse `json:"relationships"`
+}
+
+type relationshipResponse struct {
+	TargetID string `json:"target_id"`
+	Label    string `json:"label"`
 }
 
 type pendingComponentResponse struct {
@@ -233,7 +263,14 @@ func responseForSnapshot(sourceRoot, projectName string, snapshot architecture.S
 	accepted := snapshot.AuthoringComponents()
 	components := make([]componentResponse, len(accepted))
 	for index, component := range accepted {
-		components[index] = componentResponse{ID: component.ID, Title: component.Title, Description: component.Description}
+		relationships := make([]relationshipResponse, len(component.Relationships))
+		for relationshipIndex, relationship := range component.Relationships {
+			relationships[relationshipIndex] = relationshipResponse{TargetID: relationship.TargetID, Label: relationship.Label}
+		}
+		components[index] = componentResponse{
+			ID: component.ID, Title: component.Title, Description: component.Description,
+			Filename: component.Filename, Relationships: relationships,
+		}
 	}
 	result := architectureResponse{
 		SourceRoot:      sourceRoot,
@@ -298,6 +335,14 @@ func (h *Handler) initializeProject(response http.ResponseWriter, request *http.
 	}
 	h.setupMutex.Lock()
 	defer h.setupMutex.Unlock()
+	h.stateMutex.Lock()
+	defer h.stateMutex.Unlock()
+	if h.pending != nil && h.loadedProject != nil && h.loadedProject.sourceRoot != inspection.SourceRoot {
+		result := h.currentArchitectureResponseLocked()
+		result.ActionError = errorPendingBlocksSwitch
+		writeJSON(response, http.StatusConflict, result)
+		return
+	}
 
 	storeID := inspection.StoreID
 	if !inspection.Known {
@@ -324,13 +369,11 @@ func (h *Handler) initializeProject(response http.ResponseWriter, request *http.
 		return
 	}
 
-	h.publishSnapshot(inspection.SourceRoot, inspection.ProjectName, snapshot)
-	writeJSON(response, http.StatusOK, h.currentArchitectureResponse())
+	h.publishSnapshotLocked(inspection.SourceRoot, inspection.ProjectName, snapshot)
+	writeJSON(response, http.StatusOK, h.currentArchitectureResponseLocked())
 }
 
-func (h *Handler) publishSnapshot(sourceRoot, projectName string, snapshot architecture.Snapshot) bool {
-	h.stateMutex.Lock()
-	defer h.stateMutex.Unlock()
+func (h *Handler) publishSnapshotLocked(sourceRoot, projectName string, snapshot architecture.Snapshot) bool {
 	if h.pending != nil && h.pending.storeID == snapshot.StoreID() && h.pending.baseRevision != snapshot.Revision() &&
 		h.pending.baseSnapshot.StoreID() == h.pending.storeID && h.pending.baseSnapshot.Revision() == h.pending.baseRevision {
 		h.pending.review = nil
@@ -354,10 +397,57 @@ func (h *Handler) publishSnapshot(sourceRoot, projectName string, snapshot archi
 func (h *Handler) currentArchitectureResponse() architectureResponse {
 	h.stateMutex.Lock()
 	defer h.stateMutex.Unlock()
+	return h.currentArchitectureResponseLocked()
+}
+
+func (h *Handler) currentArchitectureResponseLocked() architectureResponse {
 	if h.loadedSnapshot == nil || h.loadedProject == nil {
 		return architectureResponse{}
 	}
 	return responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, *h.loadedSnapshot, h.pending, h.loadedStale, h.acceptedDiff)
+}
+
+func (h *Handler) clearLoadedProjectLocked() {
+	h.loadedSnapshot = nil
+	h.loadedProject = nil
+	h.loadedStale = false
+	h.acceptedDiff = ""
+}
+
+func (h *Handler) discardChanges(response http.ResponseWriter, request *http.Request) {
+	payload, ok := h.decodeArchitectureAction(response, request)
+	if !ok {
+		return
+	}
+	h.stateMutex.Lock()
+	defer h.stateMutex.Unlock()
+	if h.loadedSnapshot == nil || h.loadedProject == nil || payload.SourceRoot != h.loadedProject.sourceRoot {
+		writeJSON(response, http.StatusConflict, errorResponse{Code: errorArchitectureNotOpen})
+		return
+	}
+	h.pending = nil
+	writeJSON(response, http.StatusOK, h.currentArchitectureResponseLocked())
+}
+
+func (h *Handler) leaveProject(response http.ResponseWriter, request *http.Request) {
+	payload, ok := h.decodeArchitectureAction(response, request)
+	if !ok {
+		return
+	}
+	h.stateMutex.Lock()
+	defer h.stateMutex.Unlock()
+	if h.loadedSnapshot == nil || h.loadedProject == nil || payload.SourceRoot != h.loadedProject.sourceRoot {
+		writeJSON(response, http.StatusConflict, errorResponse{Code: errorArchitectureNotOpen})
+		return
+	}
+	if h.pending != nil {
+		result := h.currentArchitectureResponseLocked()
+		result.ActionError = errorPendingBlocksSwitch
+		writeJSON(response, http.StatusConflict, result)
+		return
+	}
+	h.clearLoadedProjectLocked()
+	response.WriteHeader(http.StatusNoContent)
 }
 
 type componentMutationRequest struct {
