@@ -57,6 +57,7 @@ type loadedProject struct {
 type pendingChangeSet struct {
 	storeID        string
 	baseRevision   string
+	baseSnapshot   architecture.Snapshot
 	changes        []architecture.ComponentChange
 	candidate      *architecture.Candidate
 	generation     uint64
@@ -173,8 +174,12 @@ func (h *Handler) openProject(response http.ResponseWriter, request *http.Reques
 		writeArchitectureLoadError(response, err)
 		return
 	}
-	h.publishSnapshot(inspection.SourceRoot, inspection.ProjectName, snapshot)
-	writeJSON(response, http.StatusOK, h.currentArchitectureResponse())
+	stalePending := h.publishSnapshot(inspection.SourceRoot, inspection.ProjectName, snapshot)
+	result := h.currentArchitectureResponse()
+	if stalePending {
+		result.ActionError = errorArchitectureStale
+	}
+	writeJSON(response, http.StatusOK, result)
 }
 
 type architectureResponse struct {
@@ -323,8 +328,19 @@ func (h *Handler) initializeProject(response http.ResponseWriter, request *http.
 	writeJSON(response, http.StatusOK, h.currentArchitectureResponse())
 }
 
-func (h *Handler) publishSnapshot(sourceRoot, projectName string, snapshot architecture.Snapshot) {
+func (h *Handler) publishSnapshot(sourceRoot, projectName string, snapshot architecture.Snapshot) bool {
 	h.stateMutex.Lock()
+	defer h.stateMutex.Unlock()
+	if h.pending != nil && h.pending.storeID == snapshot.StoreID() && h.pending.baseRevision != snapshot.Revision() &&
+		h.pending.baseSnapshot.StoreID() == h.pending.storeID && h.pending.baseSnapshot.Revision() == h.pending.baseRevision {
+		h.pending.review = nil
+		base := h.pending.baseSnapshot
+		h.loadedSnapshot = &base
+		h.loadedProject = &loadedProject{sourceRoot: sourceRoot, projectName: projectName}
+		h.loadedStale = true
+		h.acceptedDiff = ""
+		return true
+	}
 	keepAcceptedDiff := h.loadedSnapshot != nil && h.loadedSnapshot.StoreID() == snapshot.StoreID() && h.loadedSnapshot.Revision() == snapshot.Revision()
 	h.loadedSnapshot = &snapshot
 	h.loadedProject = &loadedProject{sourceRoot: sourceRoot, projectName: projectName}
@@ -332,7 +348,7 @@ func (h *Handler) publishSnapshot(sourceRoot, projectName string, snapshot archi
 	if !keepAcceptedDiff {
 		h.acceptedDiff = ""
 	}
-	h.stateMutex.Unlock()
+	return false
 }
 
 func (h *Handler) currentArchitectureResponse() architectureResponse {
@@ -414,7 +430,7 @@ func (h *Handler) mutateComponent(response http.ResponseWriter, request *http.Re
 		return
 	}
 	if h.pending == nil {
-		h.pending = &pendingChangeSet{storeID: snapshot.StoreID(), baseRevision: snapshot.Revision()}
+		h.pending = &pendingChangeSet{storeID: snapshot.StoreID(), baseRevision: snapshot.Revision(), baseSnapshot: snapshot}
 	}
 
 	var change architecture.ComponentChange

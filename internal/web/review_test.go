@@ -225,6 +225,48 @@ func TestStalePreObservationPreservesPendingAndCreatesNoSuccessor(t *testing.T) 
 	}
 }
 
+func TestReopenAfterExternalAdvanceKeepsPendingVisibleAsStale(t *testing.T) {
+	db := openWebTestDatabase(t)
+	source := createSourceRepository(t)
+	sourceBefore := snapshotRepository(t, source)
+	dataDirectory := t.TempDir()
+	state, handler := newHandler(db, testOrigin, t.TempDir(), dataDirectory)
+	base := decodeArchitectureResponse(t, postInitializeProject(t, handler, testOrigin, source))
+	decodeArchitectureResponse(t, postComponentMutation(t, handler, testOrigin, "/api/architecture/components/add", componentMutationRequest{
+		SourceRoot: filepath.Clean(source), Title: "Gateway", Description: "Body",
+	}))
+	reviewed := decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
+	if reviewed.Changes == nil || reviewed.Changes.Review == nil {
+		t.Fatalf("review missing before external advancement: %+v", reviewed.Changes)
+	}
+	storePath := filepath.Join(dataDirectory, "architecture", associatedStoreID(t, db, filepath.Clean(source))+".git")
+	baseTree := runGit(t, dataDirectory, "--git-dir", storePath, "show", "-s", "--format=%T", base.Revision)
+	external := runGitWithInput(t, dataDirectory, []byte("External accepted update\n"),
+		"-c", "user.name=External Human", "-c", "user.email=human@example.invalid",
+		"--git-dir", storePath, "commit-tree", baseTree, "-p", base.Revision)
+	runGit(t, dataDirectory, "--git-dir", storePath, "update-ref", "refs/heads/accepted", external, base.Revision)
+	objectsBefore := runGit(t, dataDirectory, "--git-dir", storePath, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype) %(objectname)")
+
+	response := postOpenProject(t, handler, testOrigin, source)
+	reopened := decodeArchitectureResponse(t, response)
+	if response.Code != http.StatusOK || reopened.Revision != base.Revision || !reopened.Stale || reopened.ActionError != errorArchitectureStale ||
+		reopened.Changes == nil || len(reopened.Changes.Components) != 1 || reopened.Changes.Review != nil {
+		t.Fatalf("stale reopen status=%d body=%s", response.Code, response.Body.String())
+	}
+	if state.pending == nil || state.pending.review != nil || !state.loadedStale || state.loadedSnapshot.Revision() != base.Revision {
+		t.Fatalf("stale reopen lost pending/base: pending=%+v stale=%v loaded=%s", state.pending, state.loadedStale, state.loadedSnapshot.Revision())
+	}
+	if got := runGit(t, dataDirectory, "--git-dir", storePath, "show-ref", "--verify", "--hash", "refs/heads/accepted"); got != external {
+		t.Fatalf("stale reopen changed external accepted to %s", got)
+	}
+	if objectsAfter := runGit(t, dataDirectory, "--git-dir", storePath, "cat-file", "--batch-all-objects", "--batch-check=%(objecttype) %(objectname)"); objectsAfter != objectsBefore {
+		t.Fatalf("stale reopen created an object\nbefore:\n%s\nafter:\n%s", objectsBefore, objectsAfter)
+	}
+	if after := snapshotRepository(t, source); after != sourceBefore {
+		t.Fatalf("stale reopen changed source repository\nbefore:\n%s\nafter:\n%s", sourceBefore, after)
+	}
+}
+
 func TestProductionHandlerFinalCASRacePreservesPendingAndMarksSnapshotStale(t *testing.T) {
 	db := openWebTestDatabase(t)
 	source := createSourceRepository(t)
