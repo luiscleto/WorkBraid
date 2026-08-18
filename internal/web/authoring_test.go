@@ -55,7 +55,7 @@ func TestPendingComponentAuthoringUsesOneBackendCandidateAndLeavesAcceptedUnchan
 		t.Fatalf("edit response status=%d body=%s", edited.Code, edited.Body.String())
 	}
 	added := postComponentMutation(t, handler, testOrigin, "/api/architecture/components/add", componentMutationRequest{
-		SourceRoot: filepath.Clean(source), Title: "  API  ", Description: "\nNew API body\n",
+		SourceRoot: filepath.Clean(source), Title: "  API  ", Description: "\nNew API body",
 	})
 	addedBody := decodeArchitectureResponse(t, added)
 	if added.Code != http.StatusOK || addedBody.Changes == nil || !addedBody.Changes.Valid || len(addedBody.Changes.Components) != 2 {
@@ -67,6 +67,9 @@ func TestPendingComponentAuthoringUsesOneBackendCandidateAndLeavesAcceptedUnchan
 			newID = change.ID
 			if change.Title != "API" {
 				t.Fatalf("new pending title = %q, want normalized API", change.Title)
+			}
+			if change.Description != "\nNew API body\n" {
+				t.Fatalf("new pending description = %q, want trailing newline", change.Description)
 			}
 		}
 	}

@@ -222,17 +222,32 @@ describe('App', () => {
         valid: false,
         validation_code: 'title_required',
         validation_item: 'new-id',
-        components: [{ id: 'new-id', title: '', description: 'Useful description', new: true }],
+        components: [{ id: 'new-id', title: '', description: 'Useful description\n', new: true }],
+      },
+    }
+    const invalidWithWorker = {
+      ...accepted,
+      changes: {
+        valid: false,
+        validation_code: 'title_required',
+        validation_item: 'new-id',
+        components: [
+          { id: 'new-id', title: '', description: 'Useful description\n', new: true },
+          { id: 'worker-id', title: 'Worker', description: 'Does work.\n', new: true },
+        ],
       },
     }
     const corrected = {
       ...accepted,
       changes: {
         valid: true,
-        components: [{ id: 'new-id', title: 'Worker', description: 'Useful description', new: true }],
+        components: [
+          { id: 'new-id', title: 'Gateway', description: 'Useful description\n', new: true },
+          { id: 'worker-id', title: 'Worker', description: 'Does work.\n', new: true },
+        ],
       },
     }
-    mockResponses([accepted, invalid, invalid, corrected])
+    mockResponses([accepted, invalid, invalidWithWorker, invalidWithWorker, corrected])
     const first = render(<App />)
     await submitPath('/tmp/example')
     const user = userEvent.setup()
@@ -243,19 +258,29 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: 'Changes in progress' })).toBeInTheDocument()
     expect(screen.getByText('Untitled component')).toBeInTheDocument()
     expect(screen.queryByText('Add a title.')).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Edit component' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Add component' }))
+    await user.type(screen.getByLabelText('Title'), 'Worker')
+    await user.type(screen.getByLabelText('Description'), 'Does work.')
+    await user.click(screen.getByRole('button', { name: 'Keep change' }))
+    expect(await screen.findByText('Worker')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Edit component' })).not.toBeInTheDocument()
 
     first.unmount()
     render(<App />)
     await submitPath('/tmp/example')
     expect(await screen.findByRole('heading', { name: 'Changes in progress' })).toBeInTheDocument()
     expect(screen.getByText('Untitled component')).toBeInTheDocument()
+    expect(screen.getByText('Worker')).toBeInTheDocument()
     expect(screen.queryByText('Add a title.')).not.toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Edit' }))
+    const reloadedUser = userEvent.setup()
+    const untitledItem = screen.getByText('Untitled component').closest('li') as HTMLElement
+    await reloadedUser.click(within(untitledItem).getByRole('button', { name: 'Edit' }))
     expect(screen.getByLabelText('Title')).toHaveValue('')
-    await user.clear(screen.getByLabelText('Title'))
-    await user.type(screen.getByLabelText('Title'), 'Worker')
-    await user.click(screen.getByRole('button', { name: 'Keep change' }))
-    expect(await screen.findByText('Worker')).toBeInTheDocument()
+    await reloadedUser.type(screen.getByLabelText('Title'), 'Gateway')
+    await reloadedUser.click(screen.getByRole('button', { name: 'Keep change' }))
+    expect(await screen.findByText('Gateway')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 

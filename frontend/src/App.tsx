@@ -156,14 +156,7 @@ export function App() {
         return
       }
       setState({ kind: 'ready', value: payload })
-      if (payload.changes?.valid) {
-        setEditor(null)
-      } else {
-        const invalid = payload.changes?.components.find((change) => change.id === payload.changes?.validation_item)
-        if (invalid) {
-          setEditor({ kind: 'edit', id: invalid.id, title: invalid.title, description: invalid.description, titleChanged: false, descriptionChanged: false })
-        }
-      }
+      setEditor(null)
     } catch {
       setAuthoringError("WorkBraid couldn't keep that change. Try again.")
     }

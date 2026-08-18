@@ -395,6 +395,9 @@ func (h *Handler) decodeComponentMutation(response http.ResponseWriter, request 
 
 func (h *Handler) mutateComponent(response http.ResponseWriter, request *http.Request, payload componentMutationRequest, add bool) {
 	payload.Title = strings.TrimSpace(payload.Title)
+	if add || payload.DescriptionChanged {
+		payload.Description = normalizeAuthoredDescription(payload.Description)
+	}
 	h.stateMutex.Lock()
 	defer h.stateMutex.Unlock()
 	if h.loadedSnapshot == nil || h.loadedProject == nil || payload.SourceRoot != h.loadedProject.sourceRoot {
@@ -478,6 +481,13 @@ func (h *Handler) mutateComponent(response http.ResponseWriter, request *http.Re
 		h.pending.candidate = &candidate
 	}
 	writeJSON(response, http.StatusOK, responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, h.pending, h.loadedStale, h.acceptedDiff))
+}
+
+func normalizeAuthoredDescription(description string) string {
+	if description == "" || strings.HasSuffix(description, "\n") {
+		return description
+	}
+	return description + "\n"
 }
 
 func (h *Handler) reviewChanges(response http.ResponseWriter, request *http.Request) {

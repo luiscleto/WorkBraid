@@ -39,10 +39,10 @@ func TestReviewAcceptAndFreshApplicationReconstructsExactSuccessor(t *testing.T)
 	recordsEntryBefore := runGit(t, dataDirectory, "--git-dir", storePath, "ls-tree", base.Revision, "components/records.md")
 
 	first := decodeArchitectureResponse(t, postComponentMutation(t, handler, testOrigin, "/api/architecture/components/edit", componentMutationRequest{
-		SourceRoot: filepath.Clean(source), ComponentID: gatewayID, Title: "Public Gateway", Description: "Receives requests.\n", TitleChanged: true, DescriptionChanged: true,
+		SourceRoot: filepath.Clean(source), ComponentID: gatewayID, Title: "Public Gateway", Description: "Receives requests.", TitleChanged: true, DescriptionChanged: true,
 	}))
 	second := decodeArchitectureResponse(t, postComponentMutation(t, handler, testOrigin, "/api/architecture/components/add", componentMutationRequest{
-		SourceRoot: filepath.Clean(source), Title: "Worker", Description: "Processes\x00jobs and literal \\x00.\n",
+		SourceRoot: filepath.Clean(source), Title: "Worker", Description: "Processes\x00jobs and literal \\x00.",
 	}))
 	if first.Changes == nil || second.Changes == nil || len(second.Changes.Components) != 2 {
 		t.Fatalf("multi-file pending state missing: %+v", second.Changes)
@@ -57,7 +57,7 @@ func TestReviewAcceptAndFreshApplicationReconstructsExactSuccessor(t *testing.T)
 	if review.BaseRevision != base.Revision || review.CandidateTree != i22CandidateTree || review.Generation != 2 ||
 		!strings.Contains(review.Diff, "components/gateway-internal.md") || !strings.Contains(review.Diff, "components/worker.md") ||
 		!strings.Contains(review.Diff, `id: "`) || !strings.Contains(review.Diff, `+Processes\x00jobs and literal \\x00.`) ||
-		strings.Contains(review.Diff, "Binary files differ") {
+		strings.Contains(review.Diff, "Binary files differ") || strings.Contains(review.Diff, "No newline at end of file") {
 		t.Fatalf("review did not cover complete canonical candidate: %+v\n%s", review, review.Diff)
 	}
 	if state.pending == nil || state.pending.review == nil || state.pending.candidate == nil ||
@@ -69,7 +69,7 @@ func TestReviewAcceptAndFreshApplicationReconstructsExactSuccessor(t *testing.T)
 	// that newer generation before browser A submits its older confirmation.
 	firstID := second.Changes.Components[0].ID
 	mutated := decodeArchitectureResponse(t, postComponentMutation(t, handler, testOrigin, "/api/architecture/components/edit", componentMutationRequest{
-		SourceRoot: filepath.Clean(source), ComponentID: firstID, Description: "Receives public requests.\n", DescriptionChanged: true,
+		SourceRoot: filepath.Clean(source), ComponentID: firstID, Description: "Receives public requests.", DescriptionChanged: true,
 	}))
 	if mutated.Changes == nil || mutated.Changes.Review != nil || state.pending.generation != 3 {
 		t.Fatalf("mutation did not invalidate review: response=%+v pending=%+v", mutated.Changes, state.pending)
