@@ -33,6 +33,11 @@ body {
   background-size: 32px 32px;
 }
 
+#root {
+  min-height: 100vh;
+  display: flow-root;
+}
+
 button,
 input,
 textarea {
@@ -354,10 +359,6 @@ button:disabled {
 .authoring-error {
 	margin: 12px 0 0;
 	font-weight: 600;
-}
-
-.review-action {
-	margin-top: 20px;
 }
 
 .review-error {
@@ -825,6 +826,7 @@ dd {
   min-width: 0;
   min-height: 0;
   max-width: 100%;
+  flex: 0 0 auto;
 }
 
 .markdown-body {
@@ -905,24 +907,47 @@ dd {
 }
 
 .workspace-notice {
-  margin: 0 0 18px;
+  flex: 0 0 auto;
+  margin: 0;
+  border-bottom: 1px solid var(--hairline);
   border-left: 3px solid #7b3d2d;
-  padding: 7px 0 7px 12px;
+  padding: 10px 18px 10px 15px;
+  background: #ead9bd;
   font-weight: 600;
 }
 
 .technical-details {
-  margin-top: auto;
-}
-
-.discard-area {
+  position: relative;
+  flex: 0 0 auto;
   margin-top: 30px;
-  padding-top: 15px;
   border-top: 1px solid var(--hairline);
+  padding-top: 14px;
+  background: var(--paper);
 }
 
-.destructive-text {
+.change-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.change-actions button {
+  min-width: auto;
+  margin: 0;
+}
+
+.discard-action {
+  border: 1px solid #733b2f;
+  padding: 12px 16px;
   color: #733b2f;
+  background: transparent;
+}
+
+.discard-action:hover:not(:disabled) {
+  color: #f8f2d8;
+  background: #733b2f;
 }
 
 .destructive-action {
@@ -936,6 +961,10 @@ dd {
 .discard-confirmation p {
   margin-bottom: 0;
   font-weight: 600;
+}
+
+.discard-confirmation .destructive-action {
+  margin-top: 0;
 }
 
 .navigation-guard {

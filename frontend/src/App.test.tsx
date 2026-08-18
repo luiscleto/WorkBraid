@@ -142,6 +142,8 @@ describe('App', () => {
     const details = screen.getByText('Technical details').closest('details')
     expect(details).not.toHaveAttribute('open')
     expect(within(details as HTMLElement).getByText(revision)).toBeInTheDocument()
+    const documentation = screen.getByRole('heading', { name: 'API' }).closest('article') as HTMLElement
+    expect(documentation.nextElementSibling).toBe(details)
   })
 
   it('keeps accepted components separate while one edit and one addition accumulate as changes in progress', async () => {
@@ -445,8 +447,9 @@ describe('App', () => {
     const user = userEvent.setup()
 
     await user.click(await screen.findByRole('button', { name: 'Discard changes' }))
-    expect(screen.getByText('Discard every change in progress?')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Discard changes' }))
+    const confirmation = screen.getByRole('dialog', { name: 'Discard changes?' })
+    expect(confirmation).toHaveTextContent('This clears every change in progress. The accepted architecture will not change.')
+    await user.click(within(confirmation).getByRole('button', { name: 'Discard changes' }))
 
     expect(await screen.findByRole('heading', { name: 'Start with a component' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Changes in progress/ })).not.toBeInTheDocument()
@@ -487,7 +490,10 @@ describe('App', () => {
     await user.click(await screen.findByRole('button', { name: 'Open another project' }))
 
     expect(await screen.findByRole('heading', { name: 'Changes in progress' })).toBeInTheDocument()
-    expect(screen.getByRole('alert')).toHaveTextContent('Keep working here or discard these changes before opening another project.')
+    const notice = screen.getByRole('alert')
+    expect(notice).toHaveTextContent('Keep working here or discard these changes before opening another project.')
+    expect(notice.parentElement).toHaveClass('workspace-shell')
+    expect(notice.nextElementSibling).toHaveClass('architecture-workbench')
     expect(screen.getByText('Worker')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Open a project' })).not.toBeInTheDocument()
     expect(requestPath(fetchMock, 1)).toBe('/api/projects/leave')

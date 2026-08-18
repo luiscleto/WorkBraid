@@ -376,6 +376,7 @@ export function App() {
           </div>
         </header>
         {result.stale && <div className="stale-banner" role="alert">This view is out of date. Changes in progress remain tied to the architecture they started from.</div>}
+        {architectureNotice && <p className="workspace-notice" role="alert">{architectureNotice}</p>}
         <div className={`architecture-workbench ${result.changes?.review ? 'reviewing' : ''}`}>
           <nav className="component-index" aria-label="Components">
             <div className="index-heading"><h1>Components</h1></div>
@@ -411,7 +412,6 @@ export function App() {
             />
           </section>
           <aside className="working-pane" aria-label="Architecture task">
-            {architectureNotice && <p className="workspace-notice" role="alert">{architectureNotice}</p>}
             {editor ? (
               <ComponentEditorForm
                 editor={editor}
@@ -614,6 +614,9 @@ function ChangesTask({
 }) {
   const changes = result.changes
   if (!changes) return null
+  const discardAction = !acceptanceUnknown
+    ? <button className="discard-action" type="button" disabled={busy} onClick={onBeginDiscard}>Discard changes</button>
+    : null
   return (
     <section className="changes-in-progress" aria-labelledby="changes-heading">
       <div className="pane-heading"><p className="eyebrow">Architecture</p><h2 id="changes-heading">Changes in progress</h2></div>
@@ -628,8 +631,13 @@ function ChangesTask({
       </ul>
       {changes.review_blocker && <p className="review-error" role="alert">{messageForReviewBlocker(changes.review_blocker)}</p>}
       {result.action_error && !changes.review_blocker && <p className="review-error" role="alert">{messageForArchitectureAction(result.action_error)}</p>}
-      {!result.stale && !changes.review && !acceptanceUnknown && (
-        <button className="inline-action review-action" type="button" disabled={busy} onClick={onReview}>{busy ? 'Preparing…' : 'Review changes'}</button>
+      {(!changes.review || result.stale) && !acceptanceUnknown && (
+        <div className="change-actions">
+          {!result.stale && !changes.review && (
+            <button className="inline-action" type="button" disabled={busy} onClick={onReview}>{busy ? 'Preparing…' : 'Review changes'}</button>
+          )}
+          {discardAction}
+        </div>
       )}
       {changes.review && !result.stale && (
         <section className="change-review" aria-labelledby="review-heading">
@@ -644,20 +652,24 @@ function ChangesTask({
               <dt>Change version</dt><dd>{changes.review.generation}</dd>
             </dl>
           </details>
-          <button className="inline-action review-action" type="button" disabled={busy} onClick={onUpdate}>{busy ? 'Updating…' : 'Update architecture'}</button>
+          <div className="change-actions">
+            <button className="inline-action" type="button" disabled={busy} onClick={onUpdate}>{busy ? 'Updating…' : 'Update architecture'}</button>
+            {discardAction}
+          </div>
         </section>
       )}
-      {!acceptanceUnknown && <div className="discard-area">
-        {discardConfirming ? (
-          <div className="discard-confirmation" role="alert">
-            <p>Discard every change in progress?</p>
+      {discardConfirming && (
+        <div className="navigation-guard" role="dialog" aria-modal="true" aria-labelledby="discard-heading">
+          <div className="discard-confirmation">
+            <h2 id="discard-heading">Discard changes?</h2>
+            <p>This clears every change in progress. The accepted architecture will not change.</p>
             <div className="button-group">
               <button className="secondary-action" type="button" onClick={onCancelDiscard}>Keep changes</button>
               <button className="destructive-action" type="button" disabled={busy} onClick={onDiscard}>Discard changes</button>
             </div>
           </div>
-        ) : <button className="text-action destructive-text" type="button" onClick={onBeginDiscard}>Discard changes</button>}
-      </div>}
+        </div>
+      )}
     </section>
   )
 }
