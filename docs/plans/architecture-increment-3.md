@@ -31,7 +31,7 @@ After a project is opened, the project-opening sheet is replaced by the durable 
 - one contextual working pane shows the selected component's accepted documentation or the existing structured authoring task;
 - a compact **Changes in progress** affordance opens pending editing and review in the working area rather than adding another permanent region.
 
-The opening/setup experience is a separate entry state and is no longer visible above an open workspace. Selecting an accepted component in either the index or map selects the same stable component identity and displays its accepted documentation.
+The opening/setup experience is a separate entry state and is no longer visible above an open workspace. Selecting an accepted component in either the index or map selects the same stable component identity and displays its accepted documentation. If Changes in progress exists, leaving for another project requires the human either to keep working in the current workspace or explicitly discard the entire pending change set first.
 
 ### Implementation scope
 
@@ -46,6 +46,9 @@ The opening/setup experience is a separate entry state and is no longer visible 
 - Make the browser renderer explicitly prevent Markdown image, embed, and resource syntax from causing automatic remote or local resource access; do not rely on renderer-library defaults for this boundary. Rendering also never executes authored content. Normal links may be followed only by deliberate user action. Markdown links never create Architecture relationships.
 - Make the right working pane contextual: accepted documentation when reading, and the existing Title/Description component editor when adding or editing. Do not create a separate component-management page.
 - Keep **Changes in progress** compact in the workspace frame or navigation. Opening it reuses the working area; complete diff review may temporarily take more workspace width.
+- Add one deliberate whole-set **Discard changes** action within the Changes-in-progress task. It clears the backend-held pending set and any reviewed-candidate state without modifying Git refs or objects, accepted Architecture, source files, SQLite Architecture state, or the loaded accepted snapshot.
+- If pending work exists, **Open another project** must not leave the current workspace, silently discard the pending set, or strand it behind another loaded project. Direct the human to continue working or deliberately discard the whole set; only then may the application return to the project-opening state.
+- Keep discard intentionally whole-set. Do not add partial discard, undo/redo, multiple pending sets, persistence, merge, rebase, reconciliation, or a general draft lifecycle.
 - Ensure the index and map always use accepted titles and accepted topology from the same snapshot. Pending title edits do not rename their nodes/index entries, and pending new components do not appear there before acceptance.
 - For an empty accepted Architecture, show a restrained real empty state with the existing creation action rather than fake nodes, placeholder panels, or disabled future controls.
 - Structure the desktop workbench so its regions can later collapse into one-at-a-time surfaces at narrower widths, without designing mobile-specific interaction now.
@@ -60,11 +63,12 @@ Exact browser component boundaries, map-library integration details already boun
 - Multiple relationships and cycles are valid; relationships have meaningful direction and free-text labels but no stable IDs or ordered semantics.
 - Markdown rendering is inert, does not rewrite canonical source, does not infer Architecture relationships, and performs no automatic arbitrary network/file access.
 - Project opening is not permanent workspace chrome, and stale/non-current state is conspicuous only when relevant.
+- Explicit discard affects only non-canonical backend-held pending/review state; accepted and operational authorities remain unchanged.
 - Layout, selection, viewport, and index order remain non-canonical UI state.
 
 ### Acceptance criteria
 
-- Opening a linked project replaces the opening sheet with the Architecture workbench; opening another project deliberately returns to the entry state.
+- Opening a linked project replaces the opening sheet with the Architecture workbench. With no pending work, opening another project deliberately returns to the entry state; with pending work, it remains in the current workspace until the human continues or explicitly discards the whole pending set.
 - The compact index and map contain exactly the components from the loaded accepted revision and use their accepted titles.
 - Duplicate titles remain independently selectable by stable identity; only colliding entries receive minimal filename or shortened-ID disambiguation context.
 - The map contains every accepted relationship, including cycles and multiple independently inspectable labels between the same source and target.
@@ -73,6 +77,7 @@ Exact browser component boundaries, map-library integration details already boun
 - Raw HTML remains visibly inert, executable/special block syntax does not run, and authored content causes no automatic arbitrary remote or local resource access.
 - The existing Add/Edit and Changes-in-progress tasks are reachable through the contextual workspace without being appended below the map or becoming permanent dashboard regions.
 - Pending new components and pending title changes remain visible through Changes in progress but do not alter the index or map.
+- **Discard changes** clears the entire pending set and reviewed-candidate state, leaves Git refs/objects, accepted Architecture, source files, SQLite Architecture state, and the loaded accepted snapshot exact, and then permits leaving the workspace or beginning new work from the loaded accepted revision.
 - Empty Architecture remains usable and has no fake map content or speculative chrome.
 - Existing accepted review/commit, restart, stale handling, and source-repository isolation continue to work unchanged.
 
@@ -80,9 +85,9 @@ Exact browser component boundaries, map-library integration details already boun
 
 Focused backend tests use real temporary bare repositories to load exact accepted snapshots containing empty Architecture, disconnected components, duplicate titles, cycles, and parallel labelled relationships. They prove the browser-facing snapshot data corresponds to the exact loaded commit and that no second Git/frontmatter interpretation path exists.
 
-Focused frontend tests cover workspace entry/exit, synchronized ID-based index/map selection, duplicate-title disambiguation without general ID/path chrome, accepted-versus-pending titles and components, contextual documentation/edit/changes tasks, empty Architecture, and safe rendering of the approved Markdown cases. Security-oriented fixtures prove the browser renderer explicitly suppresses automatic remote/local access from image, embed, and resource syntax rather than inheriting library defaults; raw HTML is inert, fenced/special syntax does not execute, and links require deliberate action.
+Focused backend/frontend tests prove whole-set discard removes pending/review state without changing Git, accepted snapshot, SQLite Architecture state, or source files, and that project switching remains blocked while pending work exists. Frontend tests also cover workspace entry/exit, synchronized ID-based index/map selection, duplicate-title disambiguation without general ID/path chrome, accepted-versus-pending titles and components, contextual documentation/edit/changes tasks, empty Architecture, and safe rendering of the approved Markdown cases. Security-oriented fixtures prove the browser renderer explicitly suppresses automatic remote/local access from image, embed, and resource syntax rather than inheriting library defaults; raw HTML is inert, fenced/special syntax does not execute, and links require deliberate action.
 
-The real human checkpoint uses the built UI served by the real Go process, a real compatible Git executable, a deliberately prepared valid private bare-store fixture, real SQLite association state, and a real throwaway source repository. Open accepted component-bearing Architecture with representative authored relationships; verify the opening sheet disappears, index/map/documentation agree at one recorded revision, parallel relationships remain inspectable, safe rendering behaves as approved, pending component/title changes do not alter accepted projections, and the source repository remains untouched. Stop before I3.2.
+The real human checkpoint uses the built UI served by the real Go process, a real compatible Git executable, a deliberately prepared valid private bare-store fixture, real SQLite association state, and real throwaway source repositories. Open accepted component-bearing Architecture with representative authored relationships; verify the opening sheet disappears, index/map/documentation agree at one recorded revision, parallel relationships remain inspectable, safe rendering behaves as approved, and pending component/title changes do not alter accepted projections. While pending work exists, verify opening another project is blocked without loss; deliberately discard the whole set, prove accepted Git/snapshot, SQLite, and source files remain unchanged, then open another project. Stop before I3.2.
 
 ### Dependencies
 
@@ -90,7 +95,7 @@ Completed Architecture Increment 2.
 
 ### Deliberately deferred
 
-Relationship authoring, explicit external accepted refresh behavior beyond preserving the existing open/reopen semantics, graphical editing, draft-topology preview, persisted/manual layout, grouping, hierarchy, map overlays, source inference, remote-media policy, general component management, and mobile-specific UX.
+Relationship authoring, explicit external accepted refresh behavior beyond preserving the existing open/reopen semantics, partial discard, undo/redo, multiple pending sets, persisted pending work, merge/rebase/reconciliation, graphical editing, draft-topology preview, persisted/manual layout, grouping, hierarchy, map overlays, source inference, remote-media policy, general component management, and mobile-specific UX.
 
 ### Integration and human checkpoint
 
@@ -168,7 +173,7 @@ I3.2 receives its own approved execution packet and one implementation worker. A
 
 The Architecture workspace has a compact explicit **Refresh** action. WorkBraid remains quiet when the loaded accepted revision is current. If accepted Architecture advances externally, refresh either adopts one complete valid replacement snapshot or clearly marks the existing view stale/non-current when the new revision cannot be loaded.
 
-Refresh never silently repairs, falls back, merges, rebases, or overwrites. Pending changes remain bound to their exact base and become visibly stale when accepted Architecture has advanced; they remain reachable read-only through Changes in progress without being projected onto the accepted map. A human may discard the entire stale non-canonical change set so new work can begin against the current accepted revision.
+Refresh never silently repairs, falls back, merges, rebases, or overwrites. Pending changes remain bound to their exact base and become visibly stale when accepted Architecture has advanced; they remain reachable read-only through Changes in progress without being projected onto the accepted map. The established whole-set **Discard changes** operation remains available so stale non-canonical work can be cleared and new work can begin against the current accepted revision.
 
 ### Implementation scope
 
@@ -177,7 +182,7 @@ Refresh never silently repairs, falls back, merges, rebases, or overwrites. Pend
 - If `accepted` still identifies the loaded revision, retain the existing snapshot without manufacturing positive status chrome or canonical churn.
 - If `accepted` identifies a different valid supported revision, atomically replace the accepted snapshot. Update the map, component index, accepted documentation, and relationship resolution together from that one revision.
 - If a pending change set is based on the older revision, preserve it against its exact base, invalidate any prior review, mark it stale/read-only, and keep it reachable through Changes in progress. Do not rebase, merge, reconstruct, or apply it to the new accepted snapshot.
-- Add one explicit **Discard changes** operation for a stale pending change set. It clears that entire backend-held non-canonical pending set and any associated review state without modifying Git refs or objects, accepted Architecture, source files, or persisted Architecture state. Once it is discarded, new pending work may begin against the current accepted revision.
+- Reuse I3.1's existing **Discard changes** operation for a stale pending change set. It continues to clear that entire backend-held non-canonical pending set and associated review state without modifying Git refs or objects, accepted Architecture, source files, or persisted Architecture state. Once it is discarded, new pending work may begin against the current accepted revision.
 - Keep discard intentionally whole-set and irreversible within this slice. Do not add partial discard, undo/redo, multiple pending sets, merge, rebase, reconciliation, or a general draft lifecycle.
 - If the externally named revision is invalid, unsupported, missing, or otherwise cannot be completely loaded, retain the previous valid snapshot only as conspicuously stale/non-current read-only reference. Do not present it as accepted state or permit direct commit from it.
 - Use product language in the normal UI. Raw ref names, manifest/parser errors, object IDs, or fallback terminology belong only in deliberate technical inspection where useful.
@@ -207,7 +212,7 @@ Refresh never silently repairs, falls back, merges, rebases, or overwrites. Pend
 
 ### Real validation
 
-Focused real-Git/backend tests externally advance `accepted` to: the same commit, a different valid revision, a valid revision while pending work is based on the old commit, one representative invalid revision, and one unsupported revision. They prove exact-ref authority, atomic snapshot publication, stale pending preservation, no fallback, no mutation on failed load, and successful later refresh after external correction. A focused discard case proves the entire stale pending set and review state are removed atomically from the running backend, Git refs/objects and accepted snapshot remain unchanged, no Architecture state is persisted, and a new pending set can then bind to the current accepted revision.
+Focused real-Git/backend tests externally advance `accepted` to: the same commit, a different valid revision, a valid revision while pending work is based on the old commit, one representative invalid revision, and one unsupported revision. They prove exact-ref authority, atomic snapshot publication, stale pending preservation, no fallback, no mutation on failed load, and successful later refresh after external correction. A focused case reuses the established discard operation and proves the entire stale pending set and review state are removed atomically from the running backend, Git refs/objects and accepted snapshot remain unchanged, no Architecture state is persisted, and a new pending set can then bind to the current accepted revision.
 
 Focused frontend tests prove explicit-only adoption, quiet unchanged refresh, synchronized map/index/document replacement, conspicuous stale/non-current presentation, read-only behavior, retained stale Changes in progress, whole-set discard, and product language without internal Git/parser terminology. No review/accept action is available for stale pending work, and discard is not presented as reconciliation or partial editing.
 
