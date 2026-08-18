@@ -493,6 +493,28 @@ describe('App', () => {
     expect(requestPath(fetchMock, 1)).toBe('/api/projects/leave')
   })
 
+  it('restores backend-held changes when opening another project is blocked after a browser reload', async () => {
+    const pending = {
+      source_root: '/tmp/project-a', project_name: 'project-a', state: 'empty', revision: '8'.repeat(40),
+      component_count: 0, component_titles: [], components: [],
+      changes: { valid: true, components: [{ id: 'worker', title: 'Worker', description: '', new: true }] },
+      action_error: 'pending_blocks_switch',
+    }
+    const fetchMock = mockResponses([pending], [409])
+    render(<App />)
+
+    await submitPath('/tmp/project-b')
+
+    expect(await screen.findByRole('heading', { name: 'Changes in progress' })).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Keep working here or discard these changes before opening another project.')
+    expect(screen.getByText('Worker')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Discard changes' })).toBeInTheDocument()
+    expect(screen.getByText('/tmp/project-a')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Open a project' })).not.toBeInTheDocument()
+    expect(requestPath(fetchMock, 0)).toBe('/api/projects/open')
+    expect(requestBody(fetchMock, 0)).toEqual({ source_root: '/tmp/project-b' })
+  })
+
   it.each([
     ['index selection', async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole('button', { name: 'Worker' }))],
     ['map selection', async () => act(() => graphHarness.select?.({ target: { id: () => 'worker' } }))],

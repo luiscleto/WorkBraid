@@ -128,6 +128,15 @@ export function App() {
       const response = await postJSON('/api/projects/open', { source_root: trimmedSourceRoot })
       const result = (await response.json()) as Inspection | ArchitectureResult | ErrorPayload
       if (!response.ok) {
+        if ('state' in result && result.action_error === 'pending_blocks_switch') {
+          setSourceRoot(result.source_root)
+          setEditor(null)
+          setAuthoringError('')
+          setDiscardConfirming(false)
+          enterWorkspace({ ...result, action_error: undefined }, 'changes')
+          setArchitectureNotice('Keep working here or discard these changes before opening another project.')
+          return
+        }
         const code = 'code' in result ? result.code : undefined
         if (isArchitectureError(code)) {
           setState({ kind: 'architecture-error', sourceRoot: trimmedSourceRoot, code })
