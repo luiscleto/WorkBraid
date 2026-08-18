@@ -64,6 +64,7 @@ type WorkspaceTask = 'documentation' | 'changes' | 'empty'
 type NavigationIntent =
   | { kind: 'component'; id: string }
   | { kind: 'changes' }
+  | { kind: 'add' }
   | { kind: 'open-another' }
 
 type ErrorCode =
@@ -299,6 +300,13 @@ export function App() {
       setWorkspaceTask('changes')
       return
     }
+    if (intent.kind === 'add') {
+      setEditor({
+        kind: 'add', title: '', description: '', titleChanged: false, descriptionChanged: false,
+        initialTitle: '', initialDescription: '',
+      })
+      return
+    }
     if (state.kind !== 'ready') return
     setArchitectureBusy(true)
     setArchitectureNotice('')
@@ -390,13 +398,7 @@ export function App() {
               </ul>
             ) : <p className="index-empty">No components</p>}
             {!result.stale && !acceptanceUnknown && (
-              <button className="index-add" type="button" onClick={() => {
-                setAuthoringError('')
-                setEditor({
-                  kind: 'add', title: '', description: '', titleChanged: false, descriptionChanged: false,
-                  initialTitle: '', initialDescription: '',
-                })
-              }}>Add component</button>
+              <button className="index-add" type="button" onClick={() => requestNavigation({ kind: 'add' })}>Add component</button>
             )}
           </nav>
           <section className="map-region">

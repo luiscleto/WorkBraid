@@ -515,6 +515,32 @@ describe('App', () => {
     expect(requestBody(fetchMock, 0)).toEqual({ source_root: '/tmp/project-b' })
   })
 
+  it('guards dirty editor values before Add component replaces the editor', async () => {
+    const workspace = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: '9'.repeat(40), component_count: 1,
+      component_titles: ['Gateway'],
+      components: [{ id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Accepted.\n', relationships: [] }],
+    }
+    const fetchMock = mockResponses([workspace])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Edit component' }))
+    await user.type(screen.getByLabelText('Title'), ' locally changed')
+
+    await user.click(screen.getByRole('button', { name: 'Add component' }))
+    expect(screen.getByRole('dialog')).toHaveTextContent('Leave without keeping?')
+    await user.click(screen.getByRole('button', { name: 'Keep editing' }))
+    expect(screen.getByRole('heading', { name: 'Edit component' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Title')).toHaveValue('Gateway locally changed')
+
+    await user.click(screen.getByRole('button', { name: 'Add component' }))
+    await user.click(screen.getByRole('button', { name: 'Leave without keeping' }))
+    expect(screen.getByRole('heading', { name: 'Add component' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Title')).toHaveValue('')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it.each([
     ['index selection', async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole('button', { name: 'Worker' }))],
     ['map selection', async () => act(() => graphHarness.select?.({ target: { id: () => 'worker' } }))],
