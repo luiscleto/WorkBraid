@@ -310,7 +310,7 @@ export function App() {
             {state.kind === 'ready' && (
               <div className="message">
                 <h2>{state.value.stale ? 'Architecture changed' : 'Architecture ready'}</h2>
-                {state.value.stale && <p>This view is out of date. Open the project again to see the latest architecture.</p>}
+                {state.value.stale && <p>This view is out of date. Changes in progress are shown against the architecture they started from.</p>}
                 {state.value.action_error && !state.value.changes && (
                   <p className="review-error" role="alert">{messageForArchitectureAction(state.value.action_error)}</p>
                 )}

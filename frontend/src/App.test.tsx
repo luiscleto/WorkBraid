@@ -373,6 +373,7 @@ describe('App', () => {
     await submitPath('/tmp/example')
 
     expect(await screen.findByRole('heading', { name: 'Architecture changed' })).toBeInTheDocument()
+    expect(screen.getByText('This view is out of date. Changes in progress are shown against the architecture they started from.')).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent('These changes are out of date because the architecture changed.')
     expect(screen.getByText('Public Gateway')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /edit|add component|review changes|update architecture/i })).not.toBeInTheDocument()
