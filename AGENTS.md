@@ -16,6 +16,7 @@ Follow `docs/ui-v0.md` for approved product language and visual direction.
 - Do not bypass the product to keep moving. If the intended loop is broken, stop and fix it. Driving Git, a terminal, or a provider by hand while calling the work done is not progress.
 - Green unit tests are not done. A feature is done when the real application, through production paths, using its real authorities (Git, filesystem, and whatever else the approved docs name), survives restart.
 - Tests must implement the same product. A fixture must not grant a capability production does not have. Fakes of real authorities do not count.
+- Parameterized asynchronous browser scenarios must be separate runner-owned test cases (for example, `it.each`). Do not put repeated render/unmount/mock-restoration lifecycles inside a manual loop in one test; let the test runner's case boundary own cleanup and mock restoration.
 - Owning domains keep their own state and approval rules. A shared shell or a shared agent does not merge them.
 - SQLite is not an event bus. Operational writes stay rare and purposeful.
 - Do not modify the user's project unless they have explicitly configured that.
