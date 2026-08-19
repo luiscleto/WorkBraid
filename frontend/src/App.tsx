@@ -840,9 +840,9 @@ function ChangesTask({
         <div className="review-error" role="alert">
           {relationshipIssueComponent ? (
             <>
-              <p><strong>{relationshipIssueName}</strong> has a relationship to fix.</p>
-              <p>{messageForReviewBlocker(changes.review_blocker)}</p>
-              <button className="text-action" type="button" onClick={() => onFixRelationship(relationshipIssueComponent)}>Fix relationship</button>
+              <p><strong>{relationshipIssueName}</strong> has a relationship {result.stale || changes.stale ? 'issue in these read-only changes.' : 'to fix.'}</p>
+              <p>{result.stale || changes.stale ? messageForReadOnlyReviewBlocker(changes.review_blocker) : messageForReviewBlocker(changes.review_blocker)}</p>
+              {!result.stale && !changes.stale && <button className="text-action" type="button" onClick={() => onFixRelationship(relationshipIssueComponent)}>Fix relationship</button>}
             </>
           ) : <p>{messageForReviewBlocker(changes.review_blocker)}</p>}
         </div>
@@ -1010,6 +1010,12 @@ function messageForReviewBlocker(code?: string) {
   if (code === 'relationship_label_required') return 'Add a label to this relationship.'
   if (code === 'relationship_target_required') return 'Choose a component for this relationship.'
   return 'Correct the component changes before updating architecture.'
+}
+
+function messageForReadOnlyReviewBlocker(code?: string) {
+  if (code === 'relationship_label_required') return 'This relationship has no label.'
+  if (code === 'relationship_target_required') return 'This relationship has no component selected.'
+  return 'This component change is incomplete.'
 }
 
 function messageForArchitectureAction(code?: string) {

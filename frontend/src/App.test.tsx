@@ -523,10 +523,11 @@ describe('App', () => {
         { id: 'target', title: 'Target B', filename: 'target.md', description: 'Current target.\n', relationships: [] },
       ],
       changes: {
-        stale: true, valid: true,
+        stale: true, valid: false, validation_code: 'relationship_label_required', validation_item: 'gateway',
+        validation_relationship_position: 1, validation_relationship_field: 'label', review_blocker: 'relationship_label_required',
         components: [{ id: 'gateway', title: 'Pending Gateway A', description: 'Pending old body.\n', new: false, relationships: [{ target_id: 'target', label: 'old calls' }] }],
         relationship_targets: [
-          { id: 'gateway', title: 'Gateway A' },
+          { id: 'gateway', title: 'Pending Gateway A' },
           { id: 'target', title: 'Target A' },
         ],
       },
@@ -537,7 +538,11 @@ describe('App', () => {
 
     expect(await screen.findByText('These changes started from an older architecture and are read-only.')).toBeInTheDocument()
     expect(screen.getByRole('navigation', { name: 'Components' })).toHaveTextContent('Gateway B')
-    expect(screen.queryByRole('button', { name: /add component|review changes|update architecture/i })).not.toBeInTheDocument()
+    const diagnostic = screen.getByRole('alert')
+    expect(diagnostic).toHaveTextContent('Pending Gateway A has a relationship issue in these read-only changes.')
+    expect(diagnostic).toHaveTextContent('This relationship has no label.')
+    expect(within(diagnostic).queryByRole('button', { name: 'Fix relationship' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /add component|edit|fix relationship|review changes|update architecture/i })).not.toBeInTheDocument()
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'View' }))
     expect(screen.getByRole('heading', { name: 'Change details' })).toBeInTheDocument()
