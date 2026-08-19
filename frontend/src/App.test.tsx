@@ -178,7 +178,7 @@ describe('App', () => {
     await user.clear(screen.getByLabelText('Title'))
     await user.type(screen.getByLabelText('Title'), 'Gateway')
     await user.clear(screen.getByLabelText('Description'))
-    await user.type(screen.getByLabelText('Description'), '\nChanged body\n')
+    await user.type(screen.getByLabelText('Description'), 'Changed body\n')
     await user.click(screen.getByRole('button', { name: 'Keep change' }))
 
     expect(await screen.findByRole('heading', { name: 'Changes in progress' })).toBeInTheDocument()
@@ -222,6 +222,7 @@ describe('App', () => {
 
     const user = userEvent.setup()
     await user.click(await screen.findByRole('button', { name: 'Edit component' }))
+    expect(screen.getByLabelText('Description')).toHaveValue('Exact body  \nSecond exact\n')
     await user.clear(screen.getByLabelText('Title'))
     await user.type(screen.getByLabelText('Title'), 'Gateway')
     await user.click(screen.getByRole('button', { name: 'Keep change' }))
@@ -232,6 +233,39 @@ describe('App', () => {
       title: 'Gateway',
       title_changed: true,
       description_changed: false,
+    })
+  })
+
+  it('hides one structural body separator while preserving it in a description edit', async () => {
+    const accepted = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: 'f'.repeat(40),
+      component_count: 1, component_titles: ['API'],
+      components: [{ id: 'api-id', title: 'API', description: '\nOriginal body\n' }],
+    }
+    const edited = {
+      ...accepted,
+      changes: {
+        valid: true,
+        components: [{ id: 'api-id', title: 'API', description: '\nChanged body\n', new: false }],
+      },
+    }
+    const fetchMock = mockResponses([accepted, edited])
+    render(<App />)
+    await submitPath('/tmp/example')
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Edit component' }))
+    expect(screen.getByLabelText('Description')).toHaveValue('Original body\n')
+    await user.clear(screen.getByLabelText('Description'))
+    await user.type(screen.getByLabelText('Description'), 'Changed body')
+    await user.click(screen.getByRole('button', { name: 'Keep change' }))
+
+    expect(requestBody(fetchMock, 1)).toEqual({
+      source_root: '/tmp/example',
+      component_id: 'api-id',
+      description: '\nChanged body',
+      title_changed: false,
+      description_changed: true,
     })
   })
 

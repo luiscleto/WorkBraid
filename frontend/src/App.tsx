@@ -66,6 +66,7 @@ type ComponentEditor = {
   id?: string
   title: string
   description: string
+  descriptionPrefix: string
   titleChanged: boolean
   descriptionChanged: boolean
   initialTitle: string
@@ -117,6 +118,12 @@ function newRelationshipRow(value: RelationshipValue = { target_id: '', label: '
 
 function relationshipRows(values: RelationshipValue[]): RelationshipRow[] {
   return values.map((value) => newRelationshipRow(value))
+}
+
+function editorDescription(source: string): { description: string; prefix: string } {
+  if (source.startsWith('\r\n')) return { description: source.slice(2), prefix: '\r\n' }
+  if (source.startsWith('\n')) return { description: source.slice(1), prefix: '\n' }
+  return { description: source, prefix: '' }
 }
 
 function relationshipValues(values: Array<RelationshipValue | RelationshipRow>): RelationshipValue[] {
@@ -220,16 +227,18 @@ export function App() {
   function editAccepted(component: AuthoringComponent, result: ArchitectureResult) {
     const pending = result.changes?.components.find((change) => change.id === component.id)
     const relationships = pending?.relationships ?? component.relationships ?? []
+    const description = editorDescription(pending?.description ?? component.description)
     setAuthoringError('')
     setEditor({
       kind: 'edit',
       id: component.id,
       title: pending?.title ?? component.title,
-      description: pending?.description ?? component.description,
+      description: description.description,
+      descriptionPrefix: description.prefix,
       titleChanged: false,
       descriptionChanged: false,
       initialTitle: pending?.title ?? component.title,
-      initialDescription: pending?.description ?? component.description,
+      initialDescription: description.description,
       relationships: relationshipRows(relationships),
       initialRelationships: relationshipValues(relationships),
     })
@@ -238,10 +247,12 @@ export function App() {
 
   function editPending(component: PendingComponent, relationshipIssue?: ComponentEditor['relationshipIssue']) {
     const relationships = component.relationships ?? []
+    const description = editorDescription(component.description)
     setAuthoringError('')
     setEditor({
-      kind: 'edit', id: component.id, title: component.title, description: component.description,
-      titleChanged: false, descriptionChanged: false, initialTitle: component.title, initialDescription: component.description,
+      kind: 'edit', id: component.id, title: component.title, description: description.description,
+      descriptionPrefix: description.prefix,
+      titleChanged: false, descriptionChanged: false, initialTitle: component.title, initialDescription: description.description,
       relationships: relationshipRows(relationships), initialRelationships: relationshipValues(relationships),
       relationshipIssue,
     })
@@ -260,7 +271,7 @@ export function App() {
         source_root: result.source_root,
         ...(editor.id ? { component_id: editor.id } : {}),
         ...(editor.kind === 'add' || editor.titleChanged ? { title: editor.title } : {}),
-        ...(editor.kind === 'add' || editor.descriptionChanged ? { description: editor.description } : {}),
+        ...(editor.kind === 'add' || editor.descriptionChanged ? { description: editor.descriptionPrefix + editor.description } : {}),
         ...(editor.kind === 'add' || relationshipsChanged ? { relationships } : {}),
         ...(editor.kind === 'edit' ? { title_changed: editor.titleChanged, description_changed: editor.descriptionChanged } : {}),
         ...(editor.kind === 'edit' && relationshipsChanged ? { relationships_changed: true } : {}),
@@ -374,7 +385,7 @@ export function App() {
     }
     if (intent.kind === 'add') {
       setEditor({
-        kind: 'add', title: '', description: '', titleChanged: false, descriptionChanged: false,
+        kind: 'add', title: '', description: '', descriptionPrefix: '', titleChanged: false, descriptionChanged: false,
         initialTitle: '', initialDescription: '',
         relationships: [], initialRelationships: [],
       })
