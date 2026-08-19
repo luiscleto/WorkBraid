@@ -52,6 +52,31 @@ Selecting a component from the map or index focuses the same accepted component 
 
 **Changes in progress** is a compact visible workspace affordance. It reuses the working area for pending editing, review, and acceptance rather than becoming another permanent region. Exact diff review may temporarily expand into more of the workspace when the task requires it.
 
+### Review changes
+
+**Review changes** remains one task combining visual review and the complete exact unified diff. It is available only after the complete candidate validates. Invalid work remains under Changes in progress with concise, actionable guidance.
+
+The candidate view is the primary review canvas. A compact toggle switches the entire review workspace between **With changes** and **Before changes**:
+
+- **With changes** shows the exact immutable reviewed candidate;
+- **Before changes** shows that review's exact bound base, not newly observed accepted Architecture.
+
+The component index, map, selected documentation/detail, titles, and relationship topology always switch together. Never show one snapshot's map beside another snapshot's index or documentation. If external authority moves after review, mark the review stale through the existing product language; do not relabel its bound base as current.
+
+In the candidate view:
+
+- unchanged topology is subdued;
+- added components and relationships are visibly distinct;
+- changed existing components remain indicated when only their Title, Description, or documentation changed;
+- removed relationship facts are visibly distinct, such as ghosted or dashed;
+- selecting a changed component or relationship focuses its review context and the relevant region of the exact unified diff.
+
+The raw unified diff remains directly inspectable in the same Review changes surface. Basic added/removed line coloring may improve readability, but it does not become a semantic or rendered-Markdown diff. If the visual map fails to render, say so clearly and retain the validated candidate and complete unified diff review path.
+
+Automatic review layout should be deterministic and stable-ID-aware, keeping unchanged components as stable as practical between Before changes and With changes. No review coordinates are canonical or persisted.
+
+Validation-bearing rows in Changes in progress visibly indicate which component needs attention. Fix affordances must look actionable, and opening one highlights and focuses the exact affected relationship control. The contextual pane also provides a clear/deselect action where selection would otherwise trap the current document or task.
+
 Pending work whose accepted base is stale remains visible and read-only through **Changes in progress**. It cannot be reviewed or accepted. The human may discard that whole non-canonical change set so new work can begin from current accepted Architecture; discard is not partial editing, reconciliation, or undo.
 
 The application frame keeps the current project and Architecture context visible, with compact actions for explicit refresh and opening another project. Do not permanently display a positive current/accepted status merely because it exists. Make stale or non-current state conspicuous when relevant; otherwise let the workspace stay quiet.

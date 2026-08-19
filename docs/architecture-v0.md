@@ -253,6 +253,20 @@ The first slice has no filesystem watcher, polling loop, per-read ref resolution
 
 If `accepted` advances to invalid or unsupported state, WorkBraid may retain the previous valid snapshot for clearly marked stale, read-only reference. It must not present that snapshot as current accepted state or allow a direct commit from it as though its base remained current.
 
+### Reviewed candidate snapshots
+
+`Review changes` is one deliberate review task over the same complete candidate used by final confirmation. A successful review is bound to:
+
+- the exact accepted base commit;
+- the exact candidate tree;
+- the pending change set's exact in-process generation.
+
+The review contains one immutable snapshot reconstructed from the exact base commit and one immutable snapshot constructed from the validated candidate tree. Both use the existing Architecture parser and validation semantics. WorkBraid does not construct another candidate, graph, parser, or review authority for visual review.
+
+Within review, the selected base or candidate snapshot supplies the component index, map topology, selected documentation/detail, titles, and relationship resolution together. A surface must never combine data from the two snapshots. The base side remains the review's exact bound base; it is not replaced by newly observed accepted Architecture. If external authority moves after review, the review becomes stale under the existing stale-base rules.
+
+Invalid pending state does not produce reviewed snapshots. It remains non-canonical work under Changes in progress with actionable validation guidance.
+
 ## 5. Structural validation
 
 Validation remains intentionally small.
@@ -310,6 +324,8 @@ The backend:
 
 The diff includes the entire pending change set and canonical frontmatter changes. It is review evidence, not another canonical artifact. No semantic diff engine is required.
 
+Visual review is assistive evidence derived from the same bound base and candidate snapshots. Candidate structural validation and the complete exact unified diff remain sufficient review evidence if visual rendering fails clearly. The visual review does not create an additional acceptance prerequisite or authority.
+
 Successful atomic advancement of `refs/heads/accepted` is the acceptance success boundary. Once that compare-and-swap succeeds, the successor commit is canonical even if subsequent in-memory publication or the HTTP/UI response fails. WorkBraid must not treat that change as still uncommitted or offer to commit it again. A post-CAS publication failure is recovered by loading the revision named by `accepted`; restart and reopen independently prove reconstruction from canonical state.
 
 If the atomic ref update fails:
@@ -358,9 +374,9 @@ All controls edit the pending change set, never canonical Git directly.
 
 For an existing component, a Description-only edit preserves the H1 bytes exactly. If a submitted normalized Title is unchanged, its existing H1 bytes are also preserved exactly. If the Title changes, WorkBraid replaces the H1 using the plain-text Title projection and serialization rules above; it does not attempt to preserve inline Markdown formatting that the structured editor does not expose. The existing ATX or Setext heading form is preserved unless doing so would conflict with the Title round-trip invariant.
 
-## 8. First-slice map
+## 8. Accepted map and candidate review map
 
-The map is an interactive projection of one exact accepted Architecture revision.
+The normal workspace map is an interactive projection of one exact accepted Architecture revision.
 
 It shows:
 
@@ -373,7 +389,21 @@ Selecting a component focuses or opens its accepted documentation. A component i
 
 The map rebuilds only when accepted state advances successfully or an accepted revision is explicitly reloaded.
 
+`Review changes` may instead display the exact immutable reviewed candidate snapshot and allow a compact switch to the review's exact immutable base snapshot. The candidate map is the primary visual review canvas. Switching snapshots switches the index, map, selected documentation/detail, titles, and relationship topology as one revision-pinned unit. The normal workspace map remains accepted-only.
+
+Visual change matching follows these rules:
+
+- components match by stable component ID;
+- relationship facts compare as a multiset of `(source component ID, target component ID, exact relationship label)`, including multiplicity;
+- a relationship target or label edit appears as one removed fact and one added fact;
+- identical parallel facts remain semantically indistinguishable;
+- projection-only edge keys may distinguish rendered edges but have no Architecture meaning.
+
+Component deletion is not part of this slice, so review does not introduce removed-component semantics or visualization. Review may distinguish added components and relationships, changed existing components, and removed relationship facts. Selecting a changed component or relationship may focus its review context and the relevant region of the exact unified diff.
+
 Selection, viewport, and automatic-layout details are UI state, not canonical Architecture. Pan, zoom, and fit are desirable initial UX rather than domain invariants.
+
+Review layout is deterministic and stable-ID-aware so unchanged components do not move gratuitously between the bound base and candidate views. Reusing transient positions from an already rendered base map within the current browser session is allowed, but coordinates remain unpersisted UI state and have no effect on review correctness.
 
 Deferred map behavior includes:
 
