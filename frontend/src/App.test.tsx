@@ -512,20 +512,60 @@ describe('App', () => {
   })
 
   it.each([
-    ['relationship_label_required', 'Add a label to each relationship before updating architecture.'],
-    ['relationship_target_required', 'Choose a component for each relationship before updating architecture.'],
-  ])('makes %s actionable only at review while retaining relationship work', async (code, message) => {
+    {
+      code: 'relationship_label_required',
+      field: 'label',
+      message: 'Add a label to this relationship.',
+      sourceID: 'gateway',
+      sourceName: 'Gateway',
+      components: [{ id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Body.\n', relationships: [] }],
+      targets: [{ id: 'gateway', title: 'Gateway' }],
+      relationship: { target_id: 'gateway', label: '' },
+    },
+    {
+      code: 'relationship_target_required',
+      field: 'target',
+      message: 'Choose a component for this relationship.',
+      sourceID: 'gateway-b',
+      sourceName: 'Gateway — private.md',
+      components: [
+        { id: 'gateway-a', title: 'Gateway', filename: 'public.md', description: 'Public.\n', relationships: [] },
+        { id: 'gateway-b', title: 'Gateway', filename: 'private.md', description: 'Private.\n', relationships: [] },
+      ],
+      targets: [
+        { id: 'gateway-a', title: 'Gateway', context: 'public.md' },
+        { id: 'gateway-b', title: 'Gateway', context: 'private.md' },
+      ],
+      relationship: { target_id: '', label: 'calls' },
+    },
+  ])('localizes $code to its component and field while retaining relationship work', async ({
+    code, field, message, sourceID, sourceName, components, targets, relationship,
+  }) => {
     const pending = {
       source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: '7'.repeat(40),
-      component_count: 1, component_titles: ['Gateway'],
-      components: [{ id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Body.\n', relationships: [] }],
+      component_count: components.length, component_titles: components.map((component) => component.title), components,
       changes: {
-        valid: false, validation_code: code, validation_item: 'gateway',
-        components: [{ id: 'gateway', title: 'Gateway', description: 'Body.\n', relationships: [{ target_id: '', label: '' }], new: false }],
-        relationship_targets: [{ id: 'gateway', title: 'Gateway' }],
+        valid: false, validation_code: code, validation_item: sourceID,
+        components: [{
+          id: sourceID,
+          title: 'Gateway',
+          description: sourceID === 'gateway-b' ? 'Private.\n' : 'Body.\n',
+          relationships: [relationship],
+          new: false,
+        }],
+        relationship_targets: targets,
       },
     }
-    const blocked = { ...pending, action_error: 'review_failed', changes: { ...pending.changes, review_blocker: code } }
+    const blocked = {
+      ...pending,
+      action_error: 'review_failed',
+      changes: {
+        ...pending.changes,
+        review_blocker: code,
+        validation_relationship_position: 1,
+        validation_relationship_field: field,
+      },
+    }
     mockResponses([pending, blocked], [200, 422])
     render(<App />)
     await submitPath('/tmp/example')
@@ -533,9 +573,20 @@ describe('App', () => {
     expect(screen.queryByText(message)).not.toBeInTheDocument()
     const user = userEvent.setup()
     await user.click(await screen.findByRole('button', { name: 'Review changes' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent(message)
-	expect(screen.getAllByText('Gateway').length).toBeGreaterThan(0)
-    expect(screen.queryByText(/yaml|frontmatter|uuid|candidate|ref/i)).not.toBeInTheDocument()
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(sourceName)
+    expect(alert).toHaveTextContent(message)
+    expect(alert).not.toHaveTextContent('before updating architecture')
+    await user.click(within(alert).getByRole('button', { name: 'Fix relationship' }))
+
+    const fieldControl = screen.getByLabelText(field === 'label' ? 'Label' : 'Target')
+    expect(fieldControl).toHaveAttribute('aria-invalid', 'true')
+    expect(fieldControl).toHaveFocus()
+    const guidanceID = fieldControl.getAttribute('aria-describedby')
+    expect(guidanceID).toBeTruthy()
+    expect(document.getElementById(guidanceID!)).toHaveTextContent(message)
+    expect(screen.getByRole('button', { name: 'Keep change' })).toBeInTheDocument()
+    expect(screen.queryByText(/yaml|frontmatter|uuid|parser|candidate|ref/i)).not.toBeInTheDocument()
   })
 
   it('guards unsent relationship fields before workbench navigation replaces the editor', async () => {

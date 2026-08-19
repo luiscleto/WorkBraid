@@ -38,6 +38,8 @@ type ChangesInProgress = {
   valid: boolean
   validation_code?: string
   validation_item?: string
+  validation_relationship_position?: number
+  validation_relationship_field?: 'target' | 'label'
   review?: ChangeReview
   review_blocker?: string
 }
@@ -70,6 +72,7 @@ type ComponentEditor = {
   initialDescription: string
   relationships: RelationshipRow[]
   initialRelationships: RelationshipValue[]
+  relationshipIssue?: { position: number; field: 'target' | 'label' }
 }
 
 type WorkspaceTask = 'documentation' | 'changes' | 'empty'
@@ -140,6 +143,12 @@ function relationshipTargetsFor(result: ArchitectureResult): RelationshipTarget[
 function relationshipTargetLabel(target: RelationshipTarget) {
   const title = target.title.trim() || 'Untitled component'
   return [title, target.context, target.new ? 'New component' : ''].filter(Boolean).join(' — ')
+}
+
+function relationshipIssueComponentName(changes: ChangesInProgress, component: PendingComponent) {
+  const target = changes.relationship_targets?.find((candidate) => candidate.id === component.id)
+  const title = (target?.title ?? component.title).trim() || 'Untitled component'
+  return target?.context ? `${title} — ${target.context}` : title
 }
 
 export function App() {
@@ -227,13 +236,14 @@ export function App() {
     setWorkspaceTask('documentation')
   }
 
-  function editPending(component: PendingComponent) {
+  function editPending(component: PendingComponent, relationshipIssue?: ComponentEditor['relationshipIssue']) {
     const relationships = component.relationships ?? []
     setAuthoringError('')
     setEditor({
       kind: 'edit', id: component.id, title: component.title, description: component.description,
       titleChanged: false, descriptionChanged: false, initialTitle: component.title, initialDescription: component.description,
       relationships: relationshipRows(relationships), initialRelationships: relationshipValues(relationships),
+      relationshipIssue,
     })
     setWorkspaceTask('changes')
   }
@@ -496,6 +506,10 @@ export function App() {
                 acceptanceUnknown={acceptanceUnknown}
                 discardConfirming={discardConfirming}
                 onEdit={editPending}
+                onFixRelationship={(component) => editPending(component, {
+                  position: result.changes?.validation_relationship_position ?? 0,
+                  field: result.changes?.validation_relationship_field ?? 'target',
+                })}
                 onReview={() => reviewChanges(result)}
                 onUpdate={() => updateArchitecture(result)}
                 onBeginDiscard={() => setDiscardConfirming(true)}
@@ -634,6 +648,14 @@ function ComponentEditorForm({
   onCancel: () => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
 }) {
+  const issueRowKey = editor.relationshipIssue && editor.relationshipIssue.position > 0
+    ? editor.relationships[editor.relationshipIssue.position - 1]?.rowKey
+    : undefined
+  useEffect(() => {
+    if (!issueRowKey || !editor.relationshipIssue) return
+    document.getElementById(`relationship-${editor.relationshipIssue.field}-${issueRowKey}`)?.focus()
+  }, [editor.relationshipIssue, issueRowKey])
+
   return (
     <form className="component-form" onSubmit={onSubmit}>
       <div className="pane-heading"><p className="eyebrow">Architecture</p><h2>{editor.kind === 'add' ? 'Add component' : 'Edit component'}</h2></div>
@@ -661,6 +683,8 @@ function ComponentEditorForm({
                 <select
                   id={`relationship-target-${relationship.rowKey}`}
                   value={relationship.target_id}
+                  aria-invalid={editor.relationshipIssue?.position === index + 1 && editor.relationshipIssue.field === 'target' ? true : undefined}
+                  aria-describedby={editor.relationshipIssue?.position === index + 1 && editor.relationshipIssue.field === 'target' ? `relationship-target-guidance-${relationship.rowKey}` : undefined}
                   onChange={(event) => setEditor({
                     ...editor,
                     relationships: editor.relationships.map((row) => row.rowKey === relationship.rowKey ? { ...row, target_id: event.target.value } : row),
@@ -669,10 +693,15 @@ function ComponentEditorForm({
                   <option value="">Choose a component</option>
                   {targets.map((target) => <option key={target.id} value={target.id}>{relationshipTargetLabel(target)}</option>)}
                 </select>
+                {editor.relationshipIssue?.position === index + 1 && editor.relationshipIssue.field === 'target' && (
+                  <p className="field-guidance" id={`relationship-target-guidance-${relationship.rowKey}`}>Choose a component for this relationship.</p>
+                )}
                 <label htmlFor={`relationship-label-${relationship.rowKey}`}>Label</label>
                 <textarea
                   id={`relationship-label-${relationship.rowKey}`}
                   value={relationship.label}
+                  aria-invalid={editor.relationshipIssue?.position === index + 1 && editor.relationshipIssue.field === 'label' ? true : undefined}
+                  aria-describedby={editor.relationshipIssue?.position === index + 1 && editor.relationshipIssue.field === 'label' ? `relationship-label-guidance-${relationship.rowKey}` : undefined}
                   rows={2}
                   placeholder="calls"
                   onChange={(event) => setEditor({
@@ -680,6 +709,9 @@ function ComponentEditorForm({
                     relationships: editor.relationships.map((row) => row.rowKey === relationship.rowKey ? { ...row, label: event.target.value } : row),
                   })}
                 />
+                {editor.relationshipIssue?.position === index + 1 && editor.relationshipIssue.field === 'label' && (
+                  <p className="field-guidance" id={`relationship-label-guidance-${relationship.rowKey}`}>Add a label to this relationship.</p>
+                )}
                 <button
                   className="text-action relationship-remove"
                   type="button"
@@ -711,6 +743,7 @@ function ChangesTask({
   acceptanceUnknown,
   discardConfirming,
   onEdit,
+  onFixRelationship,
   onReview,
   onUpdate,
   onBeginDiscard,
@@ -722,6 +755,7 @@ function ChangesTask({
   acceptanceUnknown: boolean
   discardConfirming: boolean
   onEdit: (component: PendingComponent) => void
+  onFixRelationship: (component: PendingComponent) => void
   onReview: () => void
   onUpdate: () => void
   onBeginDiscard: () => void
@@ -730,6 +764,10 @@ function ChangesTask({
 }) {
   const changes = result.changes
   if (!changes) return null
+  const relationshipIssueComponent = changes.validation_relationship_position && changes.validation_relationship_field
+    ? changes.components.find((component) => component.id === changes.validation_item)
+    : undefined
+  const relationshipIssueName = relationshipIssueComponent ? relationshipIssueComponentName(changes, relationshipIssueComponent) : ''
   const discardAction = !acceptanceUnknown
     ? <button className="discard-action" type="button" disabled={busy} onClick={onBeginDiscard}>Discard changes</button>
     : null
@@ -745,7 +783,17 @@ function ChangesTask({
           </li>
         ))}
       </ul>
-      {changes.review_blocker && <p className="review-error" role="alert">{messageForReviewBlocker(changes.review_blocker)}</p>}
+      {changes.review_blocker && (
+        <div className="review-error" role="alert">
+          {relationshipIssueComponent ? (
+            <>
+              <p><strong>{relationshipIssueName}</strong> has a relationship to fix.</p>
+              <p>{messageForReviewBlocker(changes.review_blocker)}</p>
+              <button className="text-action" type="button" onClick={() => onFixRelationship(relationshipIssueComponent)}>Fix relationship</button>
+            </>
+          ) : <p>{messageForReviewBlocker(changes.review_blocker)}</p>}
+        </div>
+      )}
       {result.action_error && !changes.review_blocker && <p className="review-error" role="alert">{messageForArchitectureAction(result.action_error)}</p>}
       {(!changes.review || result.stale) && !acceptanceUnknown && (
         <div className="change-actions">
@@ -906,8 +954,8 @@ function messageForAuthoringError(code?: string) {
 function messageForReviewBlocker(code?: string) {
   if (code === 'title_required') return 'Add a title to the untitled component before updating architecture.'
   if (code === 'title_one_line') return 'Use a one-line component title before updating architecture.'
-  if (code === 'relationship_label_required') return 'Add a label to each relationship before updating architecture.'
-  if (code === 'relationship_target_required') return 'Choose a component for each relationship before updating architecture.'
+  if (code === 'relationship_label_required') return 'Add a label to this relationship.'
+  if (code === 'relationship_target_required') return 'Choose a component for this relationship.'
   return 'Correct the component changes before updating architecture.'
 }
 

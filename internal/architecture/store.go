@@ -177,8 +177,10 @@ var (
 )
 
 type ComponentValidationError struct {
-	ComponentID string
-	Err         error
+	ComponentID          string
+	RelationshipPosition int
+	RelationshipField    string
+	Err                  error
 }
 
 func (err *ComponentValidationError) Error() string { return err.Err.Error() }
@@ -557,18 +559,26 @@ func (manager *Manager) ConstructCandidate(ctx context.Context, base Snapshot, c
 			return Candidate{}, &ComponentValidationError{ComponentID: change.ID, Err: ErrTitleOneLine}
 		}
 		if change.RelationshipsChanged || change.New {
-			for _, relationship := range change.Relationships {
+			for relationshipIndex, relationship := range change.Relationships {
 				if strings.TrimSpace(relationship.Label) == "" {
-					return Candidate{}, &ComponentValidationError{ComponentID: change.ID, Err: ErrRelationshipLabelRequired}
+					return Candidate{}, &ComponentValidationError{
+						ComponentID: change.ID, RelationshipPosition: relationshipIndex + 1, RelationshipField: "label", Err: ErrRelationshipLabelRequired,
+					}
 				}
 				if strings.TrimSpace(relationship.TargetID) == "" {
-					return Candidate{}, &ComponentValidationError{ComponentID: change.ID, Err: ErrRelationshipTargetRequired}
+					return Candidate{}, &ComponentValidationError{
+						ComponentID: change.ID, RelationshipPosition: relationshipIndex + 1, RelationshipField: "target", Err: ErrRelationshipTargetRequired,
+					}
 				}
 				if _, err := uuid.Parse(relationship.TargetID); err != nil {
-					return Candidate{}, &ComponentValidationError{ComponentID: change.ID, Err: ErrRelationshipTargetRequired}
+					return Candidate{}, &ComponentValidationError{
+						ComponentID: change.ID, RelationshipPosition: relationshipIndex + 1, RelationshipField: "target", Err: ErrRelationshipTargetRequired,
+					}
 				}
 				if _, exists := candidateIDs[relationship.TargetID]; !exists {
-					return Candidate{}, &ComponentValidationError{ComponentID: change.ID, Err: ErrRelationshipTargetRequired}
+					return Candidate{}, &ComponentValidationError{
+						ComponentID: change.ID, RelationshipPosition: relationshipIndex + 1, RelationshipField: "target", Err: ErrRelationshipTargetRequired,
+					}
 				}
 			}
 		}

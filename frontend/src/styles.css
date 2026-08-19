@@ -350,6 +350,12 @@ button:disabled {
 	outline-offset: -3px;
 }
 
+.component-form [aria-invalid="true"] {
+	border-color: #7b3d2d;
+	outline: 3px solid rgb(123 61 45 / 16%);
+	outline-offset: -3px;
+}
+
 .relationship-editor {
 	margin: 24px 0 0;
 	border: 0;
@@ -377,6 +383,14 @@ button:disabled {
 .relationship-row select,
 .relationship-row textarea {
 	grid-column: 1;
+}
+
+.relationship-row .field-guidance {
+	grid-column: 1;
+	margin: 0;
+	color: #6f3326;
+	font-size: 0.86rem;
+	font-weight: 600;
 }
 
 .component-form .relationship-row label {
@@ -426,6 +440,14 @@ button:disabled {
 	padding: 8px 0 8px 14px;
 	font-weight: 600;
 	line-height: 1.5;
+}
+
+.review-error p {
+	margin: 0 0 6px;
+}
+
+.review-error .text-action {
+	margin-top: 4px;
 }
 
 .change-review {

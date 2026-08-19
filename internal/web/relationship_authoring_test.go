@@ -109,25 +109,29 @@ func TestRelationshipAuthoringUsesCompleteCandidateAndExistingAcceptancePath(t *
 
 	blank := decodeArchitectureResponse(t, postComponentMutation(t, handler, testOrigin, "/api/architecture/components/edit", componentMutationRequest{
 		SourceRoot: filepath.Clean(source), ComponentID: sourceID, RelationshipsChanged: true,
-		Relationships: []relationshipResponse{{TargetID: pendingID, Label: "  \n "}},
+		Relationships: []relationshipResponse{{TargetID: workerID, Label: "calls"}, {TargetID: pendingID, Label: "  \n "}},
 	}))
-	if blank.Changes == nil || blank.Changes.Valid || blank.Changes.ValidationCode != "relationship_label_required" {
+	if blank.Changes == nil || blank.Changes.Valid || blank.Changes.ValidationCode != "relationship_label_required" ||
+		blank.Changes.ValidationItem != sourceID || blank.Changes.ValidationRelationshipPosition != 2 || blank.Changes.ValidationRelationshipField != "label" {
 		t.Fatalf("blank label was not retained as invalid pending: %+v", blank.Changes)
 	}
 	blocked := decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
-	if blocked.Changes == nil || blocked.Changes.Review != nil || blocked.Changes.ReviewBlocker != "relationship_label_required" {
+	if blocked.Changes == nil || blocked.Changes.Review != nil || blocked.Changes.ReviewBlocker != "relationship_label_required" ||
+		blocked.Changes.ValidationItem != sourceID || blocked.Changes.ValidationRelationshipPosition != 2 || blocked.Changes.ValidationRelationshipField != "label" {
 		t.Fatalf("blank label review outcome = %+v", blocked.Changes)
 	}
 
 	missing := decodeArchitectureResponse(t, postComponentMutation(t, handler, testOrigin, "/api/architecture/components/edit", componentMutationRequest{
 		SourceRoot: filepath.Clean(source), ComponentID: sourceID, RelationshipsChanged: true,
-		Relationships: []relationshipResponse{{TargetID: "", Label: "calls"}},
+		Relationships: []relationshipResponse{{TargetID: workerID, Label: "calls"}, {TargetID: "", Label: "reads from"}},
 	}))
-	if missing.Changes == nil || missing.Changes.Valid || missing.Changes.ValidationCode != "relationship_target_required" {
+	if missing.Changes == nil || missing.Changes.Valid || missing.Changes.ValidationCode != "relationship_target_required" ||
+		missing.Changes.ValidationItem != sourceID || missing.Changes.ValidationRelationshipPosition != 2 || missing.Changes.ValidationRelationshipField != "target" {
 		t.Fatalf("missing target was not retained as invalid pending: %+v", missing.Changes)
 	}
 	blocked = decodeArchitectureResponse(t, postArchitectureAction(t, handler, testOrigin, "/api/architecture/review", source))
-	if blocked.Changes == nil || blocked.Changes.ReviewBlocker != "relationship_target_required" || len(blocked.Changes.Components) != 3 {
+	if blocked.Changes == nil || blocked.Changes.ReviewBlocker != "relationship_target_required" || len(blocked.Changes.Components) != 3 ||
+		blocked.Changes.ValidationItem != sourceID || blocked.Changes.ValidationRelationshipPosition != 2 || blocked.Changes.ValidationRelationshipField != "target" {
 		t.Fatalf("missing target review discarded pending state: %+v", blocked.Changes)
 	}
 

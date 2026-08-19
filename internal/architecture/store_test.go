@@ -545,8 +545,13 @@ func TestConstructCandidateResolvesRelationshipToPendingNewComponent(t *testing.
 		t.Fatalf("candidate component count = %d", candidate.Snapshot().ComponentCount())
 	}
 	change.Relationships[0].TargetID = uuid.NewString()
-	if _, err := manager.ConstructCandidate(context.Background(), base, []ComponentChange{created, change}); !errors.Is(err, ErrRelationshipTargetRequired) {
+	_, err = manager.ConstructCandidate(context.Background(), base, []ComponentChange{created, change})
+	if !errors.Is(err, ErrRelationshipTargetRequired) {
 		t.Fatalf("unresolved target error = %v", err)
+	}
+	var validationError *ComponentValidationError
+	if !errors.As(err, &validationError) || validationError.ComponentID != sourceID || validationError.RelationshipPosition != 1 || validationError.RelationshipField != "target" {
+		t.Fatalf("unresolved target location = %+v", validationError)
 	}
 }
 

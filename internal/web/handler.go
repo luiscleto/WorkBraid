@@ -55,16 +55,18 @@ type loadedProject struct {
 }
 
 type pendingChangeSet struct {
-	storeID        string
-	baseRevision   string
-	baseSnapshot   architecture.Snapshot
-	changes        []architecture.ComponentChange
-	candidate      *architecture.Candidate
-	generation     uint64
-	review         *reviewBinding
-	reviewBlocker  string
-	validationCode string
-	validationItem string
+	storeID                        string
+	baseRevision                   string
+	baseSnapshot                   architecture.Snapshot
+	changes                        []architecture.ComponentChange
+	candidate                      *architecture.Candidate
+	generation                     uint64
+	review                         *reviewBinding
+	reviewBlocker                  string
+	validationCode                 string
+	validationItem                 string
+	validationRelationshipPosition int
+	validationRelationshipField    string
 }
 
 type reviewBinding struct {
@@ -248,13 +250,15 @@ type relationshipTargetResponse struct {
 }
 
 type changesResponse struct {
-	Components          []pendingComponentResponse   `json:"components"`
-	RelationshipTargets []relationshipTargetResponse `json:"relationship_targets"`
-	Valid               bool                         `json:"valid"`
-	ValidationCode      string                       `json:"validation_code,omitempty"`
-	ValidationItem      string                       `json:"validation_item,omitempty"`
-	Review              *reviewResponse              `json:"review,omitempty"`
-	ReviewBlocker       string                       `json:"review_blocker,omitempty"`
+	Components                     []pendingComponentResponse   `json:"components"`
+	RelationshipTargets            []relationshipTargetResponse `json:"relationship_targets"`
+	Valid                          bool                         `json:"valid"`
+	ValidationCode                 string                       `json:"validation_code,omitempty"`
+	ValidationItem                 string                       `json:"validation_item,omitempty"`
+	ValidationRelationshipPosition int                          `json:"validation_relationship_position,omitempty"`
+	ValidationRelationshipField    string                       `json:"validation_relationship_field,omitempty"`
+	Review                         *reviewResponse              `json:"review,omitempty"`
+	ReviewBlocker                  string                       `json:"review_blocker,omitempty"`
 }
 
 type reviewResponse struct {
@@ -304,12 +308,14 @@ func responseForSnapshot(sourceRoot, projectName string, snapshot architecture.S
 			}
 		}
 		result.Changes = &changesResponse{
-			Components:          changes,
-			RelationshipTargets: relationshipTargets(accepted, pending.changes),
-			Valid:               pending.candidate != nil,
-			ValidationCode:      pending.validationCode,
-			ValidationItem:      pending.validationItem,
-			ReviewBlocker:       pending.reviewBlocker,
+			Components:                     changes,
+			RelationshipTargets:            relationshipTargets(accepted, pending.changes),
+			Valid:                          pending.candidate != nil,
+			ValidationCode:                 pending.validationCode,
+			ValidationItem:                 pending.validationItem,
+			ValidationRelationshipPosition: pending.validationRelationshipPosition,
+			ValidationRelationshipField:    pending.validationRelationshipField,
+			ReviewBlocker:                  pending.reviewBlocker,
 		}
 		if pending.review != nil && pending.review.generation == pending.generation && pending.candidate != nil && pending.review.candidateTree == pending.candidate.Tree() {
 			result.Changes.Review = &reviewResponse{
@@ -625,10 +631,14 @@ func (h *Handler) mutateComponent(response http.ResponseWriter, request *http.Re
 	h.pending.candidate = nil
 	h.pending.validationCode = ""
 	h.pending.validationItem = ""
+	h.pending.validationRelationshipPosition = 0
+	h.pending.validationRelationshipField = ""
 	if err != nil {
 		var componentError *architecture.ComponentValidationError
 		if errors.As(err, &componentError) {
 			h.pending.validationItem = componentError.ComponentID
+			h.pending.validationRelationshipPosition = componentError.RelationshipPosition
+			h.pending.validationRelationshipField = componentError.RelationshipField
 		} else {
 			h.pending.validationItem = change.ID
 		}
@@ -716,6 +726,8 @@ func (h *Handler) reviewChanges(response http.ResponseWriter, request *http.Requ
 	h.pending.candidate = &candidate
 	h.pending.validationCode = ""
 	h.pending.validationItem = ""
+	h.pending.validationRelationshipPosition = 0
+	h.pending.validationRelationshipField = ""
 	h.pending.review = &reviewBinding{
 		baseRevision: snapshot.Revision(), candidateTree: candidate.Tree(), generation: h.pending.generation,
 		diff: string(diff), candidate: candidate,
@@ -863,9 +875,13 @@ func (h *Handler) recordCandidateValidation(pending *pendingChangeSet, err error
 	pending.candidate = nil
 	pending.validationCode = "change_invalid"
 	pending.validationItem = ""
+	pending.validationRelationshipPosition = 0
+	pending.validationRelationshipField = ""
 	var componentError *architecture.ComponentValidationError
 	if errors.As(err, &componentError) {
 		pending.validationItem = componentError.ComponentID
+		pending.validationRelationshipPosition = componentError.RelationshipPosition
+		pending.validationRelationshipField = componentError.RelationshipField
 	}
 	switch {
 	case errors.Is(err, architecture.ErrTitleRequired):
