@@ -42,6 +42,7 @@ type ChangesInProgress = {
   validation_relationship_field?: 'target' | 'label'
   review?: ChangeReview
   review_blocker?: string
+  stale?: boolean
 }
 
 type RelationshipTarget = {
@@ -74,6 +75,7 @@ type ComponentEditor = {
   relationships: RelationshipRow[]
   initialRelationships: RelationshipValue[]
   relationshipIssue?: { position: number; field: 'target' | 'label' }
+  readOnly?: boolean
 }
 
 type WorkspaceTask = 'documentation' | 'changes' | 'empty'
@@ -83,6 +85,7 @@ type NavigationIntent =
   | { kind: 'changes' }
   | { kind: 'add' }
   | { kind: 'open-another' }
+  | { kind: 'refresh' }
 
 type ErrorCode =
   | 'path_required'
@@ -245,7 +248,7 @@ export function App() {
     setWorkspaceTask('documentation')
   }
 
-  function editPending(component: PendingComponent, relationshipIssue?: ComponentEditor['relationshipIssue']) {
+  function editPending(component: PendingComponent, relationshipIssue?: ComponentEditor['relationshipIssue'], readOnly = false) {
     const relationships = component.relationships ?? []
     const description = editorDescription(component.description)
     setAuthoringError('')
@@ -254,7 +257,7 @@ export function App() {
       descriptionPrefix: description.prefix,
       titleChanged: false, descriptionChanged: false, initialTitle: component.title, initialDescription: description.description,
       relationships: relationshipRows(relationships), initialRelationships: relationshipValues(relationships),
-      relationshipIssue,
+      relationshipIssue, readOnly,
     })
     setWorkspaceTask('changes')
   }
@@ -392,6 +395,10 @@ export function App() {
       return
     }
     if (state.kind !== 'ready') return
+    if (intent.kind === 'refresh') {
+      await refreshArchitecture(state.value)
+      return
+    }
     setArchitectureBusy(true)
     setArchitectureNotice('')
     try {
@@ -436,6 +443,27 @@ export function App() {
     }
   }
 
+  async function refreshArchitecture(result: ArchitectureResult) {
+    setArchitectureBusy(true)
+    setArchitectureNotice('')
+    try {
+      const response = await postJSON('/api/architecture/refresh', { source_root: result.source_root })
+      const payload = (await response.json()) as ArchitectureResult | ErrorPayload
+      if (!('state' in payload)) {
+        setArchitectureNotice(messageForArchitectureAction('code' in payload ? payload.code : undefined))
+        return
+      }
+      const notice = payload.action_error ? messageForArchitectureAction(payload.action_error) : ''
+      const nextTask = payload.changes?.stale ? 'changes' : workspaceTask
+      enterWorkspace({ ...payload, action_error: undefined }, nextTask)
+      setArchitectureNotice(notice)
+    } catch {
+      setArchitectureNotice(messageForArchitectureAction('refresh_failed'))
+    } finally {
+      setArchitectureBusy(false)
+    }
+  }
+
   if (state.kind === 'ready') {
     const result = state.value
     const selected = result.components?.find((component) => component.id === selectedComponentID)
@@ -454,12 +482,15 @@ export function App() {
                 Changes in progress <span className="change-count">{result.changes.components.length}</span>
               </button>
             ) : null}
+            <button className="text-action" type="button" disabled={architectureBusy || acceptanceUnknown} onClick={() => requestNavigation({ kind: 'refresh' })}>
+              Refresh
+            </button>
             <button className="text-action" type="button" disabled={architectureBusy || acceptanceUnknown} onClick={() => requestNavigation({ kind: 'open-another' })}>
               Open another project
             </button>
           </div>
         </header>
-        {result.stale && <div className="stale-banner" role="alert">This view is out of date. Changes in progress remain tied to the architecture they started from.</div>}
+        {result.stale && <div className="stale-banner" role="alert">The current architecture could not be loaded. This earlier view is read-only.</div>}
         {architectureNotice && (
           <div className="workspace-notice" role="alert">
             <span>{architectureNotice}</span>
@@ -487,7 +518,7 @@ export function App() {
                 ))}
               </ul>
             ) : <p className="index-empty">No components</p>}
-            {!result.stale && !acceptanceUnknown && (
+            {!result.stale && !result.changes?.stale && !acceptanceUnknown && (
               <button className="index-add" type="button" onClick={() => requestNavigation({ kind: 'add' })}>Add component</button>
             )}
           </nav>
@@ -516,7 +547,7 @@ export function App() {
                 busy={architectureBusy}
                 acceptanceUnknown={acceptanceUnknown}
                 discardConfirming={discardConfirming}
-                onEdit={editPending}
+                onEdit={(component) => editPending(component, undefined, result.stale || result.changes?.stale)}
                 onFixRelationship={(component) => editPending(component, {
                   position: result.changes?.validation_relationship_position ?? 0,
                   field: result.changes?.validation_relationship_field ?? 'target',
@@ -531,7 +562,7 @@ export function App() {
               <article className="component-documentation">
                 <div className="pane-heading"><p className="eyebrow">Component</p><h2>{selected.title}</h2></div>
                 <MarkdownBody source={selected.description} />
-                {!result.stale && !acceptanceUnknown && <button className="inline-action" type="button" onClick={() => editAccepted(selected, result)}>Edit component</button>}
+                {!result.stale && !result.changes?.stale && !acceptanceUnknown && <button className="inline-action" type="button" onClick={() => editAccepted(selected, result)}>Edit component</button>}
               </article>
             ) : (
               <div className="workspace-empty"><p className="eyebrow">Architecture</p><h2>Start with a component</h2><p>Add the first part of this architecture to begin the map.</p></div>
@@ -668,12 +699,20 @@ function ComponentEditorForm({
   }, [editor.relationshipIssue, issueRowKey])
 
   return (
-    <form className="component-form" onSubmit={onSubmit}>
-      <div className="pane-heading"><p className="eyebrow">Architecture</p><h2>{editor.kind === 'add' ? 'Add component' : 'Edit component'}</h2></div>
+    <form className="component-form" onSubmit={(event) => {
+      if (editor.readOnly) {
+        event.preventDefault()
+        return
+      }
+      onSubmit(event)
+    }}>
+      <div className="pane-heading"><p className="eyebrow">Architecture</p><h2>{editor.readOnly ? 'Change details' : editor.kind === 'add' ? 'Add component' : 'Edit component'}</h2></div>
+      {editor.readOnly && <p className="stale-change-note">These changes started from an older architecture and cannot be edited.</p>}
       <label htmlFor="component-title">Title</label>
       <input
         id="component-title"
         value={editor.title}
+        readOnly={editor.readOnly}
         onChange={(event) => setEditor({ ...editor, title: event.target.value, titleChanged: true })}
         autoComplete="off"
       />
@@ -681,6 +720,7 @@ function ComponentEditorForm({
       <textarea
         id="component-description"
         value={editor.description}
+        readOnly={editor.readOnly}
         onChange={(event) => setEditor({ ...editor, description: event.target.value, descriptionChanged: true })}
         rows={14}
       />
@@ -694,6 +734,7 @@ function ComponentEditorForm({
                 <select
                   id={`relationship-target-${relationship.rowKey}`}
                   value={relationship.target_id}
+                  disabled={editor.readOnly}
                   aria-invalid={editor.relationshipIssue?.position === index + 1 && editor.relationshipIssue.field === 'target' ? true : undefined}
                   aria-describedby={editor.relationshipIssue?.position === index + 1 && editor.relationshipIssue.field === 'target' ? `relationship-target-guidance-${relationship.rowKey}` : undefined}
                   onChange={(event) => setEditor({
@@ -711,6 +752,7 @@ function ComponentEditorForm({
                 <textarea
                   id={`relationship-label-${relationship.rowKey}`}
                   value={relationship.label}
+                  readOnly={editor.readOnly}
                   aria-invalid={editor.relationshipIssue?.position === index + 1 && editor.relationshipIssue.field === 'label' ? true : undefined}
                   aria-describedby={editor.relationshipIssue?.position === index + 1 && editor.relationshipIssue.field === 'label' ? `relationship-label-guidance-${relationship.rowKey}` : undefined}
                   rows={2}
@@ -723,26 +765,26 @@ function ComponentEditorForm({
                 {editor.relationshipIssue?.position === index + 1 && editor.relationshipIssue.field === 'label' && (
                   <p className="field-guidance" id={`relationship-label-guidance-${relationship.rowKey}`}>Add a label to this relationship.</p>
                 )}
-                <button
+                {!editor.readOnly && <button
                   className="text-action relationship-remove"
                   type="button"
                   aria-label={`Remove relationship ${index + 1}`}
                   onClick={() => setEditor({ ...editor, relationships: editor.relationships.filter((row) => row.rowKey !== relationship.rowKey) })}
-                >Remove</button>
+                >Remove</button>}
               </div>
             ))}
           </div>
         ) : <p className="relationship-empty">No outgoing relationships</p>}
-        <button
+        {!editor.readOnly && <button
           className="secondary-action relationship-add"
           type="button"
           onClick={() => setEditor({ ...editor, relationships: [...editor.relationships, newRelationshipRow()] })}
-        >Add relationship</button>
+        >Add relationship</button>}
       </fieldset>
       {error && <p className="authoring-error" role="alert">{error}</p>}
       <div className="button-group">
-        <button className="secondary-action" type="button" onClick={onCancel}>Cancel</button>
-        <button className="inline-action" type="submit">Keep change</button>
+        <button className="secondary-action" type="button" onClick={onCancel}>{editor.readOnly ? 'Back' : 'Cancel'}</button>
+        {!editor.readOnly && <button className="inline-action" type="submit">Keep change</button>}
       </div>
     </form>
   )
@@ -785,12 +827,12 @@ function ChangesTask({
   return (
     <section className="changes-in-progress" aria-labelledby="changes-heading">
       <div className="pane-heading"><p className="eyebrow">Architecture</p><h2 id="changes-heading">Changes in progress</h2></div>
-      <p>These changes have not updated the architecture yet.</p>
+      <p>{changes.stale ? 'These changes started from an older architecture and are read-only.' : 'These changes have not updated the architecture yet.'}</p>
       <ul>
         {changes.components.map((component) => (
           <li key={component.id}>
             <span>{component.title.trim() || 'Untitled component'}</span>
-            {!result.stale && !acceptanceUnknown && <button className="text-action" type="button" onClick={() => onEdit(component)}>Edit</button>}
+            {!acceptanceUnknown && <button className="text-action" type="button" onClick={() => onEdit(component)}>{result.stale || changes.stale ? 'View' : 'Edit'}</button>}
           </li>
         ))}
       </ul>
@@ -806,15 +848,15 @@ function ChangesTask({
         </div>
       )}
       {result.action_error && !changes.review_blocker && <p className="review-error" role="alert">{messageForArchitectureAction(result.action_error)}</p>}
-      {(!changes.review || result.stale) && !acceptanceUnknown && (
+      {(!changes.review || result.stale || changes.stale) && !acceptanceUnknown && (
         <div className="change-actions">
-          {!result.stale && !changes.review && (
+          {!result.stale && !changes.stale && !changes.review && (
             <button className="inline-action" type="button" disabled={busy} onClick={onReview}>{busy ? 'Preparing…' : 'Review changes'}</button>
           )}
           {discardAction}
         </div>
       )}
-      {changes.review && !result.stale && (
+      {changes.review && !result.stale && !changes.stale && (
         <section className="change-review" aria-labelledby="review-heading">
           <h3 id="review-heading">Review changes</h3>
           <p>Inspect the complete change before updating the architecture; backslashes and non-printing characters use escaped notation.</p>
@@ -977,5 +1019,10 @@ function messageForArchitectureAction(code?: string) {
   if (code === 'update_uncertain') return 'WorkBraid could not confirm the current architecture. Open the project again.'
   if (code === 'update_failed') return "WorkBraid couldn't update the architecture. Try again."
   if (code === 'review_failed') return "WorkBraid couldn't prepare these changes for review. Try again."
+  if (code === 'refresh_failed') return "WorkBraid couldn't check for architecture changes. Try Refresh again."
+  if (code === 'refresh_changed') return 'Architecture changed again while WorkBraid was refreshing. Refresh once more.'
+  if (code === 'refresh_unsupported') return 'The current architecture uses features this version of WorkBraid cannot open.'
+  if (code === 'refresh_invalid') return 'The current architecture could not be read. This earlier view is read-only.'
+  if (code === 'refresh_unavailable') return 'The current architecture could not be found. This earlier view is read-only.'
   return "WorkBraid couldn't complete that action. Try again."
 }

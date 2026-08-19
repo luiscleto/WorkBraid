@@ -253,6 +253,18 @@ func (manager *Manager) LoadAccepted(ctx context.Context, storeID string) (Snaps
 	return manager.load(ctx, storePath, parsedStoreID, revision)
 }
 
+// LoadRevision reads and validates one exact committed Architecture revision.
+// It shares the accepted loader's parser and validation path, but does not
+// observe or assign authority to any ref. Callers must separately establish
+// that accepted still names the revision before publishing the snapshot.
+func (manager *Manager) LoadRevision(ctx context.Context, base Snapshot, revision string) (Snapshot, error) {
+	storePath, err := manager.StorePath(base.storeID.String())
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return manager.load(ctx, storePath, base.storeID, revision)
+}
+
 // InitializeOrLoad completes a compatible manifest-only bootstrap or loads the
 // exact valid revision already named by accepted. It never changes an existing
 // accepted ref.
@@ -414,6 +426,9 @@ func (manager *Manager) load(ctx context.Context, storePath string, expectedStor
 	}
 	parsed, err := parseManifest(contents)
 	if err != nil {
+		if errors.Is(err, ErrUnsupported) {
+			return Snapshot{}, fmt.Errorf("%w: %v", ErrUnsupported, err)
+		}
 		return Snapshot{}, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
 	manifestStoreID, err := uuid.Parse(parsed.StoreID)
@@ -1297,10 +1312,10 @@ func validateManifestProjectYAML(project *yaml.Node) error {
 
 func validateManifest(value manifest) error {
 	if value.Format != "workbraid-architecture" {
-		return errors.New("unsupported Architecture format")
+		return fmt.Errorf("%w: unsupported Architecture format", ErrUnsupported)
 	}
 	if value.Version != 1 {
-		return errors.New("unsupported Architecture format version")
+		return fmt.Errorf("%w: unsupported Architecture format version", ErrUnsupported)
 	}
 	if _, err := uuid.Parse(value.StoreID); err != nil {
 		return errors.New("store_id is not a valid UUID")

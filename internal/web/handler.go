@@ -47,6 +47,10 @@ type Handler struct {
 	// final CAS boundary. Production never sets them.
 	beforeAcceptedCAS           func(successor string)
 	acceptedUpdateReportFailure func() error
+	// beforeRefreshReobserve is a narrow test/checkpoint seam after an exact
+	// replacement snapshot has loaded and before accepted is observed again.
+	// Production never sets it.
+	beforeRefreshReobserve func(revision string)
 }
 
 type loadedProject struct {
@@ -67,6 +71,7 @@ type pendingChangeSet struct {
 	validationItem                 string
 	validationRelationshipPosition int
 	validationRelationshipField    string
+	stale                          bool
 }
 
 type reviewBinding struct {
@@ -97,6 +102,7 @@ func newHandler(db *sql.DB, expectedOrigin, uiDirectory, dataDirectory string) (
 	mux.HandleFunc("POST /api/architecture/review", handler.reviewChanges)
 	mux.HandleFunc("POST /api/architecture/accept", handler.acceptChanges)
 	mux.HandleFunc("POST /api/architecture/discard", handler.discardChanges)
+	mux.HandleFunc("POST /api/architecture/refresh", handler.refreshArchitecture)
 	mux.HandleFunc("POST /api/projects/leave", handler.leaveProject)
 	mux.Handle("/", handler.staticFiles())
 	return handler, mux
@@ -139,6 +145,11 @@ const (
 	errorUpdateUncertain         = "update_uncertain"
 	errorUpdatedReload           = "updated_reload"
 	errorPendingBlocksSwitch     = "pending_blocks_switch"
+	errorRefreshFailed           = "refresh_failed"
+	errorRefreshChanged          = "refresh_changed"
+	errorRefreshUnavailable      = "refresh_unavailable"
+	errorRefreshInvalid          = "refresh_invalid"
+	errorRefreshUnsupported      = "refresh_unsupported"
 )
 
 func (h *Handler) openProject(response http.ResponseWriter, request *http.Request) {
@@ -259,6 +270,7 @@ type changesResponse struct {
 	ValidationRelationshipField    string                       `json:"validation_relationship_field,omitempty"`
 	Review                         *reviewResponse              `json:"review,omitempty"`
 	ReviewBlocker                  string                       `json:"review_blocker,omitempty"`
+	Stale                          bool                         `json:"stale,omitempty"`
 }
 
 type reviewResponse struct {
@@ -296,7 +308,8 @@ func responseForSnapshot(sourceRoot, projectName string, snapshot architecture.S
 		Stale:           stale,
 		ParentDiff:      parentDiff,
 	}
-	if pending != nil && pending.storeID == snapshot.StoreID() && pending.baseRevision == snapshot.Revision() {
+	if pending != nil && pending.storeID == snapshot.StoreID() {
+		pendingAccepted := pending.baseSnapshot.AuthoringComponents()
 		changes := make([]pendingComponentResponse, len(pending.changes))
 		for index, change := range pending.changes {
 			relationships := make([]relationshipResponse, len(change.Relationships))
@@ -309,15 +322,16 @@ func responseForSnapshot(sourceRoot, projectName string, snapshot architecture.S
 		}
 		result.Changes = &changesResponse{
 			Components:                     changes,
-			RelationshipTargets:            relationshipTargets(accepted, pending.changes),
+			RelationshipTargets:            relationshipTargets(pendingAccepted, pending.changes),
 			Valid:                          pending.candidate != nil,
 			ValidationCode:                 pending.validationCode,
 			ValidationItem:                 pending.validationItem,
 			ValidationRelationshipPosition: pending.validationRelationshipPosition,
 			ValidationRelationshipField:    pending.validationRelationshipField,
 			ReviewBlocker:                  pending.reviewBlocker,
+			Stale:                          pending.stale,
 		}
-		if pending.review != nil && pending.review.generation == pending.generation && pending.candidate != nil && pending.review.candidateTree == pending.candidate.Tree() {
+		if !pending.stale && pending.review != nil && pending.review.generation == pending.generation && pending.candidate != nil && pending.review.candidateTree == pending.candidate.Tree() {
 			result.Changes.Review = &reviewResponse{
 				Diff: pending.review.diff, BaseRevision: pending.review.baseRevision,
 				CandidateTree: pending.review.candidateTree, Generation: pending.review.generation,
@@ -435,6 +449,7 @@ func (h *Handler) initializeProject(response http.ResponseWriter, request *http.
 func (h *Handler) publishSnapshotLocked(sourceRoot, projectName string, snapshot architecture.Snapshot) bool {
 	if h.pending != nil && h.pending.storeID == snapshot.StoreID() && h.pending.baseRevision != snapshot.Revision() &&
 		h.pending.baseSnapshot.StoreID() == h.pending.storeID && h.pending.baseSnapshot.Revision() == h.pending.baseRevision {
+		h.pending.stale = true
 		h.pending.review = nil
 		base := h.pending.baseSnapshot
 		h.loadedSnapshot = &base
@@ -471,6 +486,108 @@ func (h *Handler) clearLoadedProjectLocked() {
 	h.loadedProject = nil
 	h.loadedStale = false
 	h.acceptedDiff = ""
+}
+
+func (h *Handler) refreshArchitecture(response http.ResponseWriter, request *http.Request) {
+	payload, ok := h.decodeArchitectureAction(response, request)
+	if !ok {
+		return
+	}
+	h.stateMutex.Lock()
+	defer h.stateMutex.Unlock()
+	if h.loadedSnapshot == nil || h.loadedProject == nil || payload.SourceRoot != h.loadedProject.sourceRoot {
+		writeJSON(response, http.StatusConflict, errorResponse{Code: errorArchitectureNotOpen})
+		return
+	}
+
+	loaded := *h.loadedSnapshot
+	observationContext, cancelObservation := context.WithTimeout(request.Context(), architectureObservationTimeout)
+	observed, present, err := h.architecture.AcceptedRevision(observationContext, loaded)
+	cancelObservation()
+	if err != nil {
+		h.writeRefreshResultLocked(response, http.StatusServiceUnavailable, errorRefreshFailed)
+		return
+	}
+	if !present {
+		h.markKnownNonCurrentLocked()
+		h.writeRefreshResultLocked(response, http.StatusConflict, errorRefreshUnavailable)
+		return
+	}
+	if observed == loaded.Revision() && !h.loadedStale {
+		writeJSON(response, http.StatusOK, h.currentArchitectureResponseLocked())
+		return
+	}
+
+	loadContext, cancelLoad := context.WithTimeout(request.Context(), architectureTransitionTimeout)
+	replacement, loadErr := h.architecture.LoadRevision(loadContext, loaded, observed)
+	cancelLoad()
+	if loadErr != nil {
+		h.markKnownNonCurrentLocked()
+		switch {
+		case errors.Is(loadErr, architecture.ErrUnsupported):
+			h.writeRefreshResultLocked(response, http.StatusUnprocessableEntity, errorRefreshUnsupported)
+		case errors.Is(loadErr, architecture.ErrUnavailable):
+			h.writeRefreshResultLocked(response, http.StatusConflict, errorRefreshUnavailable)
+		default:
+			h.writeRefreshResultLocked(response, http.StatusConflict, errorRefreshInvalid)
+		}
+		return
+	}
+	if h.beforeRefreshReobserve != nil {
+		h.beforeRefreshReobserve(observed)
+	}
+
+	finalContext, cancelFinal := context.WithTimeout(request.Context(), architectureObservationTimeout)
+	finalRevision, finalPresent, finalErr := h.architecture.AcceptedRevision(finalContext, loaded)
+	cancelFinal()
+	if finalErr != nil {
+		h.writeRefreshResultLocked(response, http.StatusServiceUnavailable, errorRefreshFailed)
+		return
+	}
+	if !finalPresent {
+		h.markKnownNonCurrentLocked()
+		h.writeRefreshResultLocked(response, http.StatusConflict, errorRefreshUnavailable)
+		return
+	}
+	if finalRevision != observed {
+		if finalRevision == loaded.Revision() {
+			// Authority returned to the retained, already validated snapshot.
+			// A pending set already known stale stays stale until discarded.
+			h.loadedStale = false
+			writeJSON(response, http.StatusOK, h.currentArchitectureResponseLocked())
+			return
+		}
+		h.markKnownNonCurrentLocked()
+		h.writeRefreshResultLocked(response, http.StatusConflict, errorRefreshChanged)
+		return
+	}
+
+	h.loadedSnapshot = &replacement
+	h.loadedStale = false
+	h.acceptedDiff = ""
+	if h.pending != nil && (h.pending.storeID != replacement.StoreID() || h.pending.baseRevision != replacement.Revision()) {
+		h.markPendingStaleLocked()
+	}
+	writeJSON(response, http.StatusOK, h.currentArchitectureResponseLocked())
+}
+
+func (h *Handler) writeRefreshResultLocked(response http.ResponseWriter, status int, actionError string) {
+	result := h.currentArchitectureResponseLocked()
+	result.ActionError = actionError
+	writeJSON(response, status, result)
+}
+
+func (h *Handler) markKnownNonCurrentLocked() {
+	h.loadedStale = true
+	h.markPendingStaleLocked()
+}
+
+func (h *Handler) markPendingStaleLocked() {
+	if h.pending == nil {
+		return
+	}
+	h.pending.stale = true
+	h.pending.review = nil
 }
 
 func (h *Handler) discardChanges(response http.ResponseWriter, request *http.Request) {
@@ -576,7 +693,7 @@ func (h *Handler) mutateComponent(response http.ResponseWriter, request *http.Re
 		return
 	}
 	snapshot := *h.loadedSnapshot
-	if h.pending != nil && (h.pending.storeID != snapshot.StoreID() || h.pending.baseRevision != snapshot.Revision()) {
+	if h.pending != nil && (h.pending.stale || h.pending.storeID != snapshot.StoreID() || h.pending.baseRevision != snapshot.Revision()) {
 		writeJSON(response, http.StatusConflict, errorResponse{Code: errorChangesElsewhere})
 		return
 	}
@@ -695,7 +812,7 @@ func (h *Handler) reviewChanges(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	snapshot := *h.loadedSnapshot
-	if h.pending == nil || h.pending.storeID != snapshot.StoreID() || h.pending.baseRevision != snapshot.Revision() {
+	if h.pending == nil || h.pending.stale || h.pending.storeID != snapshot.StoreID() || h.pending.baseRevision != snapshot.Revision() {
 		writeJSON(response, http.StatusConflict, errorResponse{Code: errorReviewFailed})
 		return
 	}
@@ -752,7 +869,7 @@ func (h *Handler) acceptChanges(response http.ResponseWriter, request *http.Requ
 	}
 	snapshot := *h.loadedSnapshot
 	pending := h.pending
-	if pending == nil || pending.review == nil {
+	if pending == nil || pending.stale || pending.review == nil {
 		writeJSON(response, http.StatusConflict, errorResponse{Code: errorReviewFailed})
 		return
 	}
@@ -868,7 +985,10 @@ func (h *Handler) acceptChanges(response http.ResponseWriter, request *http.Requ
 
 func (h *Handler) markStale(pending *pendingChangeSet) {
 	h.loadedStale = true
-	pending.review = nil
+	if pending != nil {
+		pending.stale = true
+		pending.review = nil
+	}
 }
 
 func (h *Handler) recordCandidateValidation(pending *pendingChangeSet, err error) {

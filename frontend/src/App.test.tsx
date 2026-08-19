@@ -431,11 +431,163 @@ describe('App', () => {
     await submitPath('/tmp/example')
 
     const alerts = await screen.findAllByRole('alert')
-    expect(alerts.some((alert) => alert.textContent?.includes('This view is out of date.'))).toBe(true)
+    expect(alerts.some((alert) => alert.textContent?.includes('The current architecture could not be loaded. This earlier view is read-only.'))).toBe(true)
     expect(alerts.some((alert) => alert.textContent?.includes('These changes are out of date because the architecture changed.'))).toBe(true)
     expect(screen.getByText('Public Gateway')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /edit|add component|review changes|update architecture/i })).not.toBeInTheDocument()
     expect(screen.queryByText(/merge|rebase|overwrite|repair/i)).not.toBeInTheDocument()
+  })
+
+  it('refreshes every accepted projection together only after the explicit action', async () => {
+    const revisionA = 'a'.repeat(40)
+    const revisionB = 'b'.repeat(40)
+    const acceptedA = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: revisionA,
+      component_count: 2, component_titles: ['Gateway A', 'Worker A'],
+      components: [
+        { id: 'gateway', title: 'Gateway A', filename: 'gateway.md', description: 'Accepted A.\n', relationships: [{ target_id: 'worker', label: 'calls A' }] },
+        { id: 'worker', title: 'Worker A', filename: 'worker.md', description: 'Worker A.\n', relationships: [] },
+      ],
+    }
+    const acceptedB = {
+      ...acceptedA, revision: revisionB, component_titles: ['Gateway B', 'Records B'],
+      components: [
+        { id: 'gateway', title: 'Gateway B', filename: 'gateway.md', description: 'Accepted B.\n', relationships: [{ target_id: 'records', label: 'reads from' }] },
+        { id: 'records', title: 'Records B', filename: 'records.md', description: 'Records B.\n', relationships: [] },
+      ],
+    }
+    const fetchMock = mockResponses([acceptedA, acceptedB])
+    render(<App />)
+    await submitPath('/tmp/example')
+
+    expect(screen.getByText('Accepted A.')).toBeInTheDocument()
+    expect(screen.queryByText('Gateway B')).not.toBeInTheDocument()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+
+    expect(await screen.findAllByText('Gateway B')).toHaveLength(2)
+    expect(screen.getByText('Accepted B.')).toBeInTheDocument()
+    expect(screen.queryByText('Gateway A')).not.toBeInTheDocument()
+    expect(graphHarness.calls.at(-1)?.elements).toEqual(expect.arrayContaining([
+      { data: { id: 'gateway', label: 'Gateway B' } },
+      { data: { id: 'projection:gateway:records:0', source: 'gateway', target: 'records', label: 'reads from', distance: 0 } },
+    ]))
+    expect(within(screen.getByText('Technical details').closest('details') as HTMLElement).getByText(revisionB)).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(requestPath(fetchMock, 1)).toBe('/api/architecture/refresh')
+    expect(requestBody(fetchMock, 1)).toEqual({ source_root: '/tmp/example' })
+  })
+
+  it.each([
+    ['Title', async (user: ReturnType<typeof userEvent.setup>) => user.type(screen.getByLabelText('Title'), ' changed')],
+    ['Description', async (user: ReturnType<typeof userEvent.setup>) => user.type(screen.getByLabelText('Description'), ' changed')],
+    ['relationship', async (user: ReturnType<typeof userEvent.setup>) => {
+      await user.click(screen.getByRole('button', { name: 'Add relationship' }))
+      await user.selectOptions(screen.getByLabelText('Target'), 'worker')
+      await user.type(screen.getByLabelText('Label'), 'calls')
+    }],
+  ])('guards dirty %s values before Refresh', async (_field, makeDirty) => {
+    const workspace = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: '9'.repeat(40), component_count: 2,
+      component_titles: ['Gateway', 'Worker'],
+      components: [
+        { id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Accepted.\n', relationships: [] },
+        { id: 'worker', title: 'Worker', filename: 'worker.md', description: 'Works.\n', relationships: [] },
+      ],
+    }
+    const fetchMock = mockResponses([workspace, workspace])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Edit component' }))
+    await makeDirty(user)
+
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(screen.getByRole('dialog')).toHaveTextContent('Leave without keeping?')
+    await user.click(screen.getByRole('button', { name: 'Keep editing' }))
+    expect(screen.getByRole('heading', { name: 'Edit component' })).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    await user.click(screen.getByRole('button', { name: 'Leave without keeping' }))
+    expect(await screen.findByRole('heading', { name: 'Gateway' })).toBeInTheDocument()
+    expect(requestPath(fetchMock, 1)).toBe('/api/architecture/refresh')
+  })
+
+  it('keeps stale pending work inspectable in its old context while accepted projections show the replacement', async () => {
+    const current = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: 'b'.repeat(40),
+      component_count: 2, component_titles: ['Gateway B', 'Target B'],
+      components: [
+        { id: 'gateway', title: 'Gateway B', filename: 'gateway.md', description: 'Current.\n', relationships: [] },
+        { id: 'target', title: 'Target B', filename: 'target.md', description: 'Current target.\n', relationships: [] },
+      ],
+      changes: {
+        stale: true, valid: true,
+        components: [{ id: 'gateway', title: 'Pending Gateway A', description: 'Pending old body.\n', new: false, relationships: [{ target_id: 'target', label: 'old calls' }] }],
+        relationship_targets: [
+          { id: 'gateway', title: 'Gateway A' },
+          { id: 'target', title: 'Target A' },
+        ],
+      },
+    }
+    mockResponses([current])
+    render(<App />)
+    await submitPath('/tmp/example')
+
+    expect(await screen.findByText('These changes started from an older architecture and are read-only.')).toBeInTheDocument()
+    expect(screen.getByRole('navigation', { name: 'Components' })).toHaveTextContent('Gateway B')
+    expect(screen.queryByRole('button', { name: /add component|review changes|update architecture/i })).not.toBeInTheDocument()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'View' }))
+    expect(screen.getByRole('heading', { name: 'Change details' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Title')).toHaveValue('Pending Gateway A')
+    expect(screen.getByLabelText('Title')).toHaveAttribute('readonly')
+    expect(screen.getByLabelText('Description')).toHaveValue('Pending old body.\n')
+    expect(screen.getByLabelText('Target')).toBeDisabled()
+    expect(screen.getByRole('option', { name: 'Target A' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Label')).toHaveValue('old calls')
+    expect(screen.queryByRole('button', { name: 'Keep change' })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['refresh_invalid', 'The current architecture could not be read. This earlier view is read-only.'],
+    ['refresh_unsupported', 'The current architecture uses features this version of WorkBraid cannot open.'],
+    ['refresh_unavailable', 'The current architecture could not be found. This earlier view is read-only.'],
+    ['refresh_changed', 'Architecture changed again while WorkBraid was refreshing. Refresh once more.'],
+  ])('presents conclusive %s as a non-current read-only reference', async (actionError, message) => {
+    const current = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: 'a'.repeat(40),
+      component_count: 1, component_titles: ['Gateway'],
+      components: [{ id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Earlier.\n', relationships: [] }],
+    }
+    mockResponses([current, { ...current, stale: true, action_error: actionError }], [200, 409])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+
+    const alerts = await screen.findAllByRole('alert')
+    expect(alerts.map((alert) => alert.textContent).join(' ')).toContain(message)
+    expect(screen.queryByRole('button', { name: /add component|edit component|review changes|update architecture/i })).not.toBeInTheDocument()
+    expect(screen.getByText('Earlier.')).toBeInTheDocument()
+  })
+
+  it('reports an indeterminate Refresh failure without claiming the loaded view is stale', async () => {
+    const current = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: 'a'.repeat(40),
+      component_count: 1, component_titles: ['Gateway'],
+      components: [{ id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Current.\n', relationships: [] }],
+    }
+    mockResponses([current, { ...current, action_error: 'refresh_failed' }], [200, 503])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent("WorkBraid couldn't check for architecture changes. Try Refresh again.")
+    expect(screen.queryByText(/earlier view is read-only/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit component' })).toBeInTheDocument()
   })
 
   it('uses stable identities for accepted index and map projection with collision-only context', async () => {
@@ -620,7 +772,7 @@ describe('App', () => {
     expect(guidanceID).toBeTruthy()
     expect(document.getElementById(guidanceID!)).toHaveTextContent(message)
     expect(screen.getByRole('button', { name: 'Keep change' })).toBeInTheDocument()
-    expect(screen.queryByText(/yaml|frontmatter|uuid|parser|candidate|ref/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/yaml|frontmatter|uuid|parser|candidate|\bref\b/i)).not.toBeInTheDocument()
   })
 
   it('guards unsent relationship fields before workbench navigation replaces the editor', async () => {
