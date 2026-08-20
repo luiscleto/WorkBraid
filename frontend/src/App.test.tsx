@@ -1175,6 +1175,69 @@ describe('App', () => {
     expect(screen.queryByDisplayValue('Pending Gateway locally changed')).not.toBeInTheDocument()
   })
 
+  it('guards unsent editor values when a delayed review response tries to replace the task', async () => {
+    const base = '4'.repeat(40)
+    const candidate = '5'.repeat(40)
+    const before = [
+      { id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Accepted.\n', relationships: [] },
+      { id: 'worker', title: 'Worker', filename: 'worker.md', description: 'Works.\n', relationships: [] },
+    ]
+    const pending = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: base,
+      component_count: 2, component_titles: ['Gateway', 'Worker'], components: before,
+      changes: {
+        valid: true,
+        components: [{ id: 'gateway', title: 'Pending Gateway', filename: 'gateway.md', description: 'Pending.\n', relationships: [], new: false }],
+      },
+    }
+    const reviewed = {
+      ...pending,
+      changes: {
+        ...pending.changes,
+        review: testReview({
+          base, candidate,
+          before,
+          withChanges: [{ ...before[0], title: 'Pending Gateway', description: 'Pending.\n' }, before[1]],
+          diff: 'diff --git a/components/gateway.md b/components/gateway.md\n-# Gateway\n+# Pending Gateway\n',
+          componentChanges: [{ component_id: 'gateway', status: 'content_changed', path: 'components/gateway.md' }],
+        }),
+      },
+    }
+    let finishReview: ((response: Response) => void) | undefined
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(pending), { status: 200 }))
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => { finishReview = resolve }))
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'Review changes' }))
+    expect(screen.getByRole('button', { name: 'Preparing…' })).toBeDisabled()
+    const pendingRow = screen.getByText('Pending Gateway').closest('li') as HTMLElement
+    await user.click(within(pendingRow).getByRole('button', { name: 'Edit' }))
+    await user.type(screen.getByLabelText('Title'), ' locally changed')
+    await user.clear(screen.getByLabelText('Description'))
+    await user.type(screen.getByLabelText('Description'), 'Unsent body.')
+    await user.click(screen.getByRole('button', { name: 'Add relationship' }))
+    await user.selectOptions(screen.getByLabelText('Target'), 'worker')
+    await user.type(screen.getByLabelText('Label'), 'unsent calls')
+
+    await act(async () => {
+      finishReview?.(new Response(JSON.stringify(reviewed), { status: 200 }))
+    })
+    expect(await screen.findByRole('dialog')).toHaveTextContent('Leave without keeping?')
+    expect(screen.queryByRole('button', { name: 'Update architecture' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Keep editing' }))
+
+    expect(screen.getByLabelText('Title')).toHaveValue('Pending Gateway locally changed')
+    expect(screen.getByLabelText('Description')).toHaveValue('Unsent body.')
+    expect(screen.getByLabelText('Target')).toHaveValue('worker')
+    expect(screen.getByLabelText('Label')).toHaveValue('unsent calls')
+    expect(screen.queryByRole('button', { name: 'Update architecture' })).not.toBeInTheDocument()
+    expect(requestPath(fetchMock, 1)).toBe('/api/architecture/review')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('requires a fresh review when pending changes mutate after the displayed review', async () => {
     const reviewed = {
       source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: '1'.repeat(40),

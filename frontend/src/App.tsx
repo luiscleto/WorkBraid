@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import {
   ArchitectureMap,
   ReviewMapComponentChange,
@@ -112,6 +112,7 @@ type NavigationIntent =
   | { kind: 'open-another' }
   | { kind: 'refresh' }
   | { kind: 'clear' }
+  | { kind: 'review-result'; result: ArchitectureResult }
 
 type ErrorCode =
   | 'path_required'
@@ -225,6 +226,12 @@ export function App() {
   const readyResult = state.kind === 'ready' ? state.value : undefined
   const currentReview = readyResult?.changes?.review
   const reviewIdentity = currentReview ? `${currentReview.base_revision}:${currentReview.candidate_tree}:${currentReview.generation}` : ''
+  const editorDirty = editor !== null && (
+    editor.title !== editor.initialTitle || editor.description !== editor.initialDescription ||
+    !sameRelationships(relationshipValues(editor.relationships), editor.initialRelationships)
+  )
+  const editorDirtyRef = useRef(editorDirty)
+  editorDirtyRef.current = editorDirty
 
   useEffect(() => {
     if (!currentReview) {
@@ -384,7 +391,11 @@ export function App() {
       const payload = (await response.json()) as ArchitectureResult | ErrorPayload
       if ('state' in payload) {
         setAcceptanceUnknown(false)
-        enterWorkspace(payload, 'changes')
+        if (payload.changes?.review && editorDirtyRef.current) {
+          setNavigationIntent({ kind: 'review-result', result: payload })
+        } else {
+          enterWorkspace(payload, 'changes')
+        }
       } else {
         setArchitectureNotice(messageForArchitectureAction('code' in payload ? payload.code : undefined))
       }
@@ -425,11 +436,6 @@ export function App() {
 
   const busy = state.kind === 'looking' || state.kind === 'setting-up'
 
-  const editorDirty = editor !== null && (
-    editor.title !== editor.initialTitle || editor.description !== editor.initialDescription ||
-    !sameRelationships(relationshipValues(editor.relationships), editor.initialRelationships)
-  )
-
   function requestNavigation(intent: NavigationIntent) {
     if (editorDirty) {
       setNavigationIntent(intent)
@@ -464,6 +470,11 @@ export function App() {
         initialTitle: '', initialDescription: '',
         relationships: [], initialRelationships: [],
       })
+      return
+    }
+    if (intent.kind === 'review-result') {
+      setAcceptanceUnknown(false)
+      enterWorkspace(intent.result, 'changes')
       return
     }
     if (state.kind !== 'ready') return

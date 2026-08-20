@@ -23,3 +23,29 @@ it('moves keyboard focus to the requested canonical file without changing the di
   expect(document.activeElement).toBe(container.querySelector('[data-diff-path="components/worker.md"]'))
   expect(container.querySelector('[data-testid="raw-diff"]')?.textContent).toBe(diff)
 })
+
+it('maps Git-quoted UTF-8 and backslash filenames to their canonical focus path', () => {
+  const diff = 'diff --git "a/components/caf\\303\\251\\\\worker.md" "b/components/caf\\303\\251\\\\worker.md"\n--- "a/components/caf\\303\\251\\\\worker.md"\n+++ "b/components/caf\\303\\251\\\\worker.md"\n@@ -1 +1 @@\n-old\n+new\n'
+  const canonicalPath = 'components/café\\worker.md'
+  const { container, rerender } = render(<RawDiff diff={diff} />)
+  const focusedAnchor = () => [...container.querySelectorAll('[data-diff-path]')]
+    .find((element) => element.getAttribute('data-diff-path') === canonicalPath)
+
+  expect(rawDiffLines(diff)[0].path).toBe(canonicalPath)
+  expect(focusedAnchor()).toHaveAttribute('id')
+  rerender(<RawDiff diff={diff} focusPath={canonicalPath} focusToken="quoted-path" />)
+
+  expect(document.activeElement).toBe(focusedAnchor())
+  expect(container.querySelector('[data-testid="raw-diff"]')?.textContent).toBe(diff)
+})
+
+it('distinguishes exact file metadata from added and removed content with colliding prefixes', () => {
+  const diff = 'diff --git a/components/api.md b/components/api.md\n--- a/components/api.md\n+++ b/components/api.md\n@@ -1,2 +1,3 @@\n----\n+++starts with two pluses\n+++\n'
+  const lines = rawDiffLines(diff)
+  const { container } = render(<RawDiff diff={diff} />)
+
+  expect(lines.filter((line) => line.kind === 'removed').map((line) => line.text)).toEqual(['----\n'])
+  expect(lines.filter((line) => line.kind === 'added').map((line) => line.text)).toEqual(['+++starts with two pluses\n', '+++\n'])
+  expect(lines.slice(1, 3).map((line) => line.kind)).toEqual(['header', 'header'])
+  expect(container.querySelector('[data-testid="raw-diff"]')?.textContent).toBe(diff)
+})
