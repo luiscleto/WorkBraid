@@ -49,19 +49,22 @@ export function rawDiffLines(diff: string): DiffLine[] {
   const sourceLines = diff.match(/[^\n]*\n|[^\n]+$/g) ?? []
   let currentPath = ''
   let hunk = 0
+  let inHunk = false
   return sourceLines.map((text) => {
     if (text.startsWith('diff --git ')) {
       currentPath = diffHeaderPath(text) ?? ''
       hunk = 0
+      inHunk = false
       return currentPath
         ? { text, kind: 'header', path: currentPath, anchor: `diff-file-${stableAnchor(currentPath)}` }
         : { text, kind: 'header' }
     }
     if (text.startsWith('@@')) {
       hunk += 1
+      inHunk = true
       return { text, kind: 'hunk', anchor: `diff-hunk-${stableAnchor(currentPath)}-${hunk}` }
     }
-    if (isFileMetadata(text, '---', 'a', currentPath) || isFileMetadata(text, '+++', 'b', currentPath)) {
+    if (!inHunk && (isFileMetadata(text, '---', 'a', currentPath) || isFileMetadata(text, '+++', 'b', currentPath))) {
       return { text, kind: 'header' }
     }
     if (text.startsWith('+')) return { text, kind: 'added' }
@@ -73,7 +76,8 @@ export function rawDiffLines(diff: string): DiffLine[] {
 
 function diffHeaderPath(text: string) {
   const line = withoutLineEnding(text)
-  const argumentsText = line.slice('diff --git '.length)
+  const argumentsText = presentationUnescapeBackslashes(line.slice('diff --git '.length))
+  if (argumentsText === undefined) return undefined
   if (argumentsText.startsWith('"')) {
     const before = readGitQuotedPath(argumentsText, 0)
     if (!before) return undefined
@@ -101,8 +105,24 @@ function isFileMetadata(text: string, marker: '---' | '+++', side: 'a' | 'b', cu
   if (!line.startsWith(`${marker} `)) return false
   const token = line.slice(marker.length + 1)
   if (token === '/dev/null') return true
-  const decoded = decodeWholeGitPathToken(token)
+  const gitToken = presentationUnescapeBackslashes(token)
+  if (gitToken === undefined) return false
+  const decoded = decodeWholeGitPathToken(gitToken)
   return decoded === `${side}/${currentPath}`
+}
+
+function presentationUnescapeBackslashes(value: string) {
+  let unescaped = ''
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] !== '\\') {
+      unescaped += value[index]
+      continue
+    }
+    if (value[index + 1] !== '\\') return undefined
+    unescaped += '\\'
+    index += 1
+  }
+  return unescaped
 }
 
 function decodeWholeGitPathToken(token: string) {

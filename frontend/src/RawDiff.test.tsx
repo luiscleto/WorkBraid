@@ -25,7 +25,9 @@ it('moves keyboard focus to the requested canonical file without changing the di
 })
 
 it('maps Git-quoted UTF-8 and backslash filenames to their canonical focus path', () => {
-  const diff = 'diff --git "a/components/caf\\303\\251\\\\worker.md" "b/components/caf\\303\\251\\\\worker.md"\n--- "a/components/caf\\303\\251\\\\worker.md"\n+++ "b/components/caf\\303\\251\\\\worker.md"\n@@ -1 +1 @@\n-old\n+new\n'
+  // This is the exact post-presentUnifiedDiff representation: each backslash
+  // from Git's C-quoted path has one additional presentation escape.
+  const diff = 'diff --git "a/components/caf\\\\303\\\\251\\\\\\\\worker.md" "b/components/caf\\\\303\\\\251\\\\\\\\worker.md"\n--- "a/components/caf\\\\303\\\\251\\\\\\\\worker.md"\n+++ "b/components/caf\\\\303\\\\251\\\\\\\\worker.md"\n@@ -1 +1 @@\n-old\n+new\n'
   const canonicalPath = 'components/café\\worker.md'
   const { container, rerender } = render(<RawDiff diff={diff} />)
   const focusedAnchor = () => [...container.querySelectorAll('[data-diff-path]')]
@@ -47,5 +49,17 @@ it('distinguishes exact file metadata from added and removed content with collid
   expect(lines.filter((line) => line.kind === 'removed').map((line) => line.text)).toEqual(['----\n'])
   expect(lines.filter((line) => line.kind === 'added').map((line) => line.text)).toEqual(['+++starts with two pluses\n', '+++\n'])
   expect(lines.slice(1, 3).map((line) => line.kind)).toEqual(['header', 'header'])
+  expect(container.querySelector('[data-testid="raw-diff"]')?.textContent).toBe(diff)
+})
+
+it('treats metadata-looking lines inside a hunk as changed content', () => {
+  const diff = 'diff --git a/components/api.md b/components/api.md\n--- a/components/api.md\n+++ b/components/api.md\n@@ -1 +1 @@\n--- a/components/api.md\n+++ b/components/api.md\n'
+  const lines = rawDiffLines(diff)
+  const { container } = render(<RawDiff diff={diff} />)
+
+  expect(lines[1].kind).toBe('header')
+  expect(lines[2].kind).toBe('header')
+  expect(lines[4]).toMatchObject({ kind: 'removed', text: '--- a/components/api.md\n' })
+  expect(lines[5]).toMatchObject({ kind: 'added', text: '+++ b/components/api.md\n' })
   expect(container.querySelector('[data-testid="raw-diff"]')?.textContent).toBe(diff)
 })
