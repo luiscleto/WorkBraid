@@ -4,14 +4,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
 
 const graphHarness = vi.hoisted(() => ({
-  calls: [] as Array<{ elements?: unknown[] }>,
+  calls: [] as Array<{
+    elements?: unknown[]
+    style?: Array<{ selector: string; style: Record<string, unknown> }>
+  }>,
   nodeSelect: undefined as undefined | ((event: { target: { id: () => string } }) => void),
   edgeSelect: undefined as undefined | ((event: { target: { data: () => unknown } }) => void),
   fail: false,
 }))
 
 vi.mock('cytoscape', () => ({
-  default: (options: { elements?: unknown[] }) => {
+  default: (options: { elements?: unknown[]; style?: Array<{ selector: string; style: Record<string, unknown> }> }) => {
     if (graphHarness.fail) throw new Error('canvas unavailable')
     graphHarness.calls.push(options)
     return {
@@ -470,13 +473,18 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Added relationship, occurrence 1: Gateway — publishes — Queue' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Added relationship, occurrence 2: Gateway — publishes — Queue' })).toBeInTheDocument()
     const reviewElements = graphHarness.calls.at(-1)?.elements as Array<{ data: Record<string, unknown> }>
+    const reviewStyles = graphHarness.calls.at(-1)?.style ?? []
     expect(reviewElements.find((element) => element.data.id === 'worker')?.data.reviewStatus).toBe('unchanged')
     expect(reviewElements.find((element) => element.data.id === 'review:with:worker:0')?.data.reviewStatus).toBe('added')
     expect(reviewElements.find((element) => element.data.id === 'gateway')?.data.reviewStatus).toBe('content_changed')
+    expect(reviewStyles.find((rule) => rule.selector === 'node:selected')?.style).toEqual({ 'border-width': 5, opacity: 1 })
+    expect(reviewStyles.find((rule) => rule.selector === 'edge:selected')?.style).toEqual({ width: 4.5, opacity: 1 })
     expect(screen.getByRole('button', { name: 'Update architecture' })).toBeInTheDocument()
     const reviewDetails = screen.getByText('Review details').closest('details') as HTMLElement
+    const technicalDetails = screen.getByText('Technical details').closest('details') as HTMLElement
     expect(within(reviewDetails).getByText(base)).toBeInTheDocument()
     expect(within(reviewDetails).getByText(candidate)).toBeInTheDocument()
+    expect(reviewDetails.compareDocumentPosition(technicalDetails) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 
     await user.click(screen.getByRole('button', { name: 'Added component: Queue' }))
     expect(screen.getByRole('heading', { name: 'Queue' })).toBeInTheDocument()
@@ -499,9 +507,9 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: 'Gateway' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Changes in progress' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Update architecture' })).not.toBeInTheDocument()
-    const technicalDetails = screen.getByText('Technical details').closest('details') as HTMLElement
-    expect(within(technicalDetails).getByText(successor)).toBeInTheDocument()
-    expect(within(technicalDetails).getByRole('heading', { name: 'Parent diff' })).toBeInTheDocument()
+    const acceptedTechnicalDetails = screen.getByText('Technical details').closest('details') as HTMLElement
+    expect(within(acceptedTechnicalDetails).getByText(successor)).toBeInTheDocument()
+    expect(within(acceptedTechnicalDetails).getByRole('heading', { name: 'Parent diff' })).toBeInTheDocument()
     expect(requestPath(fetchMock, 1)).toBe('/api/architecture/review')
     expect(requestPath(fetchMock, 2)).toBe('/api/architecture/accept')
     expect(requestBody(fetchMock, 2)).toEqual({

@@ -927,7 +927,7 @@ dd {
 .map-review-controls {
   position: absolute;
   z-index: 3;
-  right: 74px;
+  right: 96px;
   bottom: 14px;
   left: 14px;
   max-height: 150px;
@@ -1114,9 +1114,9 @@ dd {
 }
 
 .working-pane .review-workspace-pane {
-  min-height: 0;
+  min-height: auto;
   display: flex;
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   flex-direction: column;
 }
 
@@ -1221,9 +1221,9 @@ dd {
 }
 
 .raw-diff-region {
-  min-height: 180px;
+  min-height: 360px;
   display: flex;
-  flex: 1 1 260px;
+  flex: 0 0 auto;
   flex-direction: column;
   margin-top: 14px;
 }
@@ -1241,9 +1241,10 @@ dd {
 }
 
 .raw-diff {
-  min-height: 150px;
-  max-height: 36vh;
-  flex: 1 1 auto;
+  min-height: 300px;
+  height: clamp(340px, 52vh, 620px);
+  max-height: 72vh;
+  flex: 0 0 auto;
   margin: 0;
   border: 1px solid var(--hairline);
   padding: 10px 0;
@@ -1252,6 +1253,7 @@ dd {
   font-family: "IBM Plex Mono", monospace;
   font-size: 0.69rem;
   line-height: 1.5;
+  resize: vertical;
   white-space: pre;
 }
 
@@ -1290,6 +1292,7 @@ dd {
 }
 
 .review-details {
+  flex: 0 0 auto;
   margin-top: 10px;
   padding-top: 9px;
 }
