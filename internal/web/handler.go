@@ -241,8 +241,9 @@ type componentResponse struct {
 }
 
 type relationshipResponse struct {
-	TargetID string `json:"target_id"`
-	Label    string `json:"label"`
+	TargetID      string `json:"target_id"`
+	Label         string `json:"label"`
+	ProjectionKey string `json:"projection_key,omitempty"`
 }
 
 type pendingComponentResponse struct {
@@ -274,37 +275,29 @@ type changesResponse struct {
 }
 
 type reviewResponse struct {
-	Diff          string `json:"diff"`
-	BaseRevision  string `json:"base_revision"`
-	CandidateTree string `json:"candidate_tree"`
-	Generation    uint64 `json:"generation"`
+	Diff          string                     `json:"diff"`
+	BaseRevision  string                     `json:"base_revision"`
+	CandidateTree string                     `json:"candidate_tree"`
+	Generation    uint64                     `json:"generation"`
+	Before        snapshotProjectionResponse `json:"before"`
+	WithChanges   snapshotProjectionResponse `json:"with_changes"`
+	Comparison    reviewComparisonResponse   `json:"comparison"`
 }
 
 func responseForSnapshot(sourceRoot, projectName string, snapshot architecture.Snapshot, pending *pendingChangeSet, stale bool, parentDiff string) architectureResponse {
+	projection := projectSnapshot(snapshot, "")
 	state := "ready"
-	if snapshot.ComponentCount() == 0 {
+	if projection.ComponentCount == 0 {
 		state = "empty"
-	}
-	accepted := snapshot.AuthoringComponents()
-	components := make([]componentResponse, len(accepted))
-	for index, component := range accepted {
-		relationships := make([]relationshipResponse, len(component.Relationships))
-		for relationshipIndex, relationship := range component.Relationships {
-			relationships[relationshipIndex] = relationshipResponse{TargetID: relationship.TargetID, Label: relationship.Label}
-		}
-		components[index] = componentResponse{
-			ID: component.ID, Title: component.Title, Description: component.Description,
-			Filename: component.Filename, Relationships: relationships,
-		}
 	}
 	result := architectureResponse{
 		SourceRoot:      sourceRoot,
 		ProjectName:     projectName,
 		State:           state,
-		Revision:        snapshot.Revision(),
-		ComponentCount:  snapshot.ComponentCount(),
-		ComponentTitles: snapshot.ComponentTitles(),
-		Components:      components,
+		Revision:        projection.Revision,
+		ComponentCount:  projection.ComponentCount,
+		ComponentTitles: projection.ComponentTitles,
+		Components:      projection.Components,
 		Stale:           stale,
 		ParentDiff:      parentDiff,
 	}
@@ -332,9 +325,11 @@ func responseForSnapshot(sourceRoot, projectName string, snapshot architecture.S
 			Stale:                          pending.stale,
 		}
 		if !pending.stale && pending.review != nil && pending.review.generation == pending.generation && pending.candidate != nil && pending.review.candidateTree == pending.candidate.Tree() {
+			before, withChanges, comparison := captureReviewPresentation(pending.baseSnapshot, pending.review.candidate.Snapshot())
 			result.Changes.Review = &reviewResponse{
 				Diff: pending.review.diff, BaseRevision: pending.review.baseRevision,
 				CandidateTree: pending.review.candidateTree, Generation: pending.review.generation,
+				Before: before, WithChanges: withChanges, Comparison: comparison,
 			}
 		}
 	}
@@ -802,17 +797,19 @@ func (h *Handler) reviewChanges(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	h.stateMutex.Lock()
-	defer h.stateMutex.Unlock()
 	if h.loadedSnapshot == nil || h.loadedProject == nil || payload.SourceRoot != h.loadedProject.sourceRoot {
+		h.stateMutex.Unlock()
 		writeJSON(response, http.StatusConflict, errorResponse{Code: errorArchitectureNotOpen})
 		return
 	}
 	if h.loadedStale {
+		h.stateMutex.Unlock()
 		writeJSON(response, http.StatusConflict, errorResponse{Code: errorArchitectureStale})
 		return
 	}
 	snapshot := *h.loadedSnapshot
 	if h.pending == nil || h.pending.stale || h.pending.storeID != snapshot.StoreID() || h.pending.baseRevision != snapshot.Revision() {
+		h.stateMutex.Unlock()
 		writeJSON(response, http.StatusConflict, errorResponse{Code: errorReviewFailed})
 		return
 	}
@@ -830,6 +827,7 @@ func (h *Handler) reviewChanges(response http.ResponseWriter, request *http.Requ
 		}
 		result := responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, h.pending, false, h.acceptedDiff)
 		result.ActionError = errorReviewFailed
+		h.stateMutex.Unlock()
 		writeJSON(response, status, result)
 		return
 	}
@@ -837,6 +835,7 @@ func (h *Handler) reviewChanges(response http.ResponseWriter, request *http.Requ
 	if err != nil {
 		result := responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, h.pending, false, h.acceptedDiff)
 		result.ActionError = errorReviewFailed
+		h.stateMutex.Unlock()
 		writeJSON(response, http.StatusInternalServerError, result)
 		return
 	}
@@ -849,7 +848,12 @@ func (h *Handler) reviewChanges(response http.ResponseWriter, request *http.Requ
 		baseRevision: snapshot.Revision(), candidateTree: candidate.Tree(), generation: h.pending.generation,
 		diff: string(diff), candidate: candidate,
 	}
-	writeJSON(response, http.StatusOK, responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, h.pending, false, h.acceptedDiff))
+	// Build the complete immutable visual presentation while the binding and
+	// pending generation are protected by the same concrete state lock. JSON
+	// serialization can then proceed without blocking invalidating mutations.
+	result := responseForSnapshot(h.loadedProject.sourceRoot, h.loadedProject.projectName, snapshot, h.pending, false, h.acceptedDiff)
+	h.stateMutex.Unlock()
+	writeJSON(response, http.StatusOK, result)
 }
 
 func (h *Handler) acceptChanges(response http.ResponseWriter, request *http.Request) {

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -101,7 +102,7 @@ func TestRefreshUnchangedIsQuietAndPreservesPendingReview(t *testing.T) {
 	if response.Code != http.StatusOK || refreshed.Revision != fixture.loadedRevision || refreshed.Stale || refreshed.ActionError != "" {
 		t.Fatalf("unchanged Refresh status=%d result=%+v", response.Code, refreshed)
 	}
-	if refreshed.Changes == nil || refreshed.Changes.Stale || refreshed.Changes.Review == nil || *refreshed.Changes.Review != review {
+	if refreshed.Changes == nil || refreshed.Changes.Stale || refreshed.Changes.Review == nil || !reflect.DeepEqual(*refreshed.Changes.Review, review) {
 		t.Fatalf("unchanged Refresh displaced pending/review state: %+v", refreshed.Changes)
 	}
 	if got := snapshotPrivateArchitecture(t, fixture.dataDirectory); got != gitBefore {
@@ -262,7 +263,7 @@ func TestRefreshIndeterminateObservationDoesNotInventStaleness(t *testing.T) {
 	if response.Code != http.StatusServiceUnavailable || result.ActionError != errorRefreshFailed || result.Stale || result.Changes == nil || result.Changes.Stale {
 		t.Fatalf("indeterminate Refresh invented stale state: status=%d result=%+v", response.Code, result)
 	}
-	if result.Changes.Review == nil || *result.Changes.Review != *reviewed.Changes.Review {
+	if result.Changes.Review == nil || !reflect.DeepEqual(*result.Changes.Review, *reviewed.Changes.Review) {
 		t.Fatalf("indeterminate Refresh invalidated a current review: %+v", result.Changes)
 	}
 
@@ -360,7 +361,7 @@ func TestRefreshIndeterminateFinalObservationDoesNotPublishOrInventStaleness(t *
 	if response.Code != http.StatusServiceUnavailable || result.ActionError != errorRefreshFailed || result.Revision != fixture.loadedRevision || result.Stale {
 		t.Fatalf("indeterminate final observation published or invented stale state: status=%d result=%+v", response.Code, result)
 	}
-	if result.Changes == nil || result.Changes.Stale || result.Changes.Review == nil || *result.Changes.Review != *reviewed.Changes.Review {
+	if result.Changes == nil || result.Changes.Stale || result.Changes.Review == nil || !reflect.DeepEqual(*result.Changes.Review, *reviewed.Changes.Review) {
 		t.Fatalf("indeterminate final observation disturbed current pending/review: %+v", result.Changes)
 	}
 }

@@ -5,14 +5,20 @@ import { App } from './App'
 
 const graphHarness = vi.hoisted(() => ({
   calls: [] as Array<{ elements?: unknown[] }>,
-  select: undefined as undefined | ((event: { target: { id: () => string } }) => void),
+  nodeSelect: undefined as undefined | ((event: { target: { id: () => string } }) => void),
+  edgeSelect: undefined as undefined | ((event: { target: { data: () => unknown } }) => void),
+  fail: false,
 }))
 
 vi.mock('cytoscape', () => ({
   default: (options: { elements?: unknown[] }) => {
+    if (graphHarness.fail) throw new Error('canvas unavailable')
     graphHarness.calls.push(options)
     return {
-      on: (_event: string, _selector: string, callback: typeof graphHarness.select) => { graphHarness.select = callback },
+      on: (_event: string, selector: string, callback: unknown) => {
+        if (selector === 'node') graphHarness.nodeSelect = callback as typeof graphHarness.nodeSelect
+        if (selector === 'edge') graphHarness.edgeSelect = callback as typeof graphHarness.edgeSelect
+      },
       destroy: () => undefined,
       fit: () => undefined,
       $: () => ({ unselect: () => undefined }),
@@ -27,12 +33,58 @@ const unlinkedProject = {
   known: false,
 }
 
+type TestComponent = {
+  id: string
+  title: string
+  filename?: string
+  description: string
+  relationships?: { target_id: string; label: string; projection_key?: string }[]
+}
+
+function testReview({
+  base,
+  candidate,
+  diff,
+  generation = 1,
+  before = [],
+  withChanges = [],
+  componentChanges = [],
+  relationshipChanges = [],
+}: {
+  base: string
+  candidate: string
+  diff: string
+  generation?: number
+  before?: TestComponent[]
+  withChanges?: TestComponent[]
+  componentChanges?: Array<{ component_id: string; status: 'added' | 'content_changed'; path: string }>
+  relationshipChanges?: Array<{ key: string; before_key?: string; source_id: string; target_id: string; label: string; status: 'added' | 'removed'; path: string; occurrence: number }>
+}) {
+  const snapshot = (revision: string, components: TestComponent[]) => ({
+    revision,
+    component_count: components.length,
+    component_titles: components.map((component) => component.title),
+    components: components.map((component) => ({ ...component, filename: component.filename ?? `${component.id}.md`, relationships: component.relationships ?? [] })),
+  })
+  return {
+    diff,
+    base_revision: base,
+    candidate_tree: candidate,
+    generation,
+    before: snapshot(base, before),
+    with_changes: snapshot(candidate, withChanges),
+    comparison: { components: componentChanges, relationships: relationshipChanges },
+  }
+}
+
 describe('App', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
     graphHarness.calls.length = 0
-    graphHarness.select = undefined
+    graphHarness.nodeSelect = undefined
+    graphHarness.edgeSelect = undefined
+    graphHarness.fail = false
   })
 
   it('keeps the idle screen to one sheet without empty result chrome', () => {
@@ -200,7 +252,9 @@ describe('App', () => {
     })
     expect(requestPath(fetchMock, 2)).toBe('/api/architecture/components/add')
     expect(graphHarness.calls).toHaveLength(1)
-    expect(graphHarness.calls[0].elements).toEqual([{ data: { id: 'api-id', label: 'API' } }])
+    expect(graphHarness.calls[0].elements).toEqual([
+      expect.objectContaining({ data: expect.objectContaining({ id: 'api-id', label: 'API' }), position: { x: 0, y: 0 } }),
+    ])
   })
 
   it('sends explicit title-only intent without an untouched CRLF description', async () => {
@@ -346,26 +400,56 @@ describe('App', () => {
     const base = '1'.repeat(40)
     const candidate = '2'.repeat(40)
     const successor = '3'.repeat(40)
+    const beforeComponents = [
+      { id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Accepted gateway.\n', relationships: [{ target_id: 'worker', label: 'calls', projection_key: 'review:before:gateway:0' }] },
+      { id: 'worker', title: 'Worker', filename: 'worker.md', description: 'Worker body.\n', relationships: [] },
+      { id: 'docs', title: 'Docs', filename: 'docs.md', description: 'Old docs.\n', relationships: [] },
+    ]
+    const withComponents = [
+      { id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Changed gateway.\n', relationships: [
+        { target_id: 'worker', label: 'routes', projection_key: 'review:with:gateway:0' },
+        { target_id: 'queue', label: 'publishes', projection_key: 'review:with:gateway:1' },
+        { target_id: 'queue', label: 'publishes', projection_key: 'review:with:gateway:2' },
+      ] },
+      { id: 'worker', title: 'Worker', filename: 'worker.md', description: 'Worker body.\n', relationships: [{ target_id: 'queue', label: 'observes', projection_key: 'review:with:worker:0' }] },
+      { id: 'docs', title: 'Docs', filename: 'docs.md', description: 'New docs.\n', relationships: [] },
+      { id: 'queue', title: 'Queue', filename: 'queue.md', description: 'New queue.\n', relationships: [] },
+    ]
+    const diff = 'diff --git a/components/gateway.md b/components/gateway.md\n--- a/components/gateway.md\n+++ b/components/gateway.md\n@@ -1 +1 @@\n-Accepted gateway.\n+Changed gateway.\ndiff --git a/components/queue.md b/components/queue.md\nnew file mode 100644\n--- /dev/null\n+++ b/components/queue.md\n@@ -0,0 +1 @@\n+New queue.\n'
     const pending = {
-      source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: base,
-      component_count: 0, component_titles: [], components: [],
-      changes: { valid: true, components: [{ id: 'worker-id', title: 'Worker', description: 'Does work.\n', new: true }] },
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: base,
+      component_count: 3, component_titles: ['Gateway', 'Worker', 'Docs'], components: beforeComponents,
+      changes: { valid: true, components: [
+        { id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Changed gateway.\n', relationships: withComponents[0].relationships, new: false },
+        { id: 'queue', title: 'Queue', filename: 'queue.md', description: 'New queue.\n', relationships: [], new: true },
+        { id: 'worker', title: 'Worker', filename: 'worker.md', description: 'Worker body.\n', relationships: withComponents[1].relationships, new: false },
+        { id: 'docs', title: 'Docs', filename: 'docs.md', description: 'New docs.\n', relationships: [], new: false },
+      ] },
     }
     const reviewed = {
       ...pending,
       changes: {
         ...pending.changes,
-        review: {
-          diff: 'diff --git a/components/worker.md b/components/worker.md\n+id: "worker-id"\n+# Worker\n',
-          base_revision: base,
-          candidate_tree: candidate,
-          generation: 1,
-        },
+        review: testReview({
+          base, candidate, diff, before: beforeComponents, withChanges: withComponents,
+          componentChanges: [
+            { component_id: 'gateway', status: 'content_changed', path: 'components/gateway.md' },
+            { component_id: 'docs', status: 'content_changed', path: 'components/docs.md' },
+            { component_id: 'queue', status: 'added', path: 'components/queue.md' },
+          ],
+          relationshipChanges: [
+            { key: 'review:removed:gateway:0', before_key: 'review:before:gateway:0', source_id: 'gateway', target_id: 'worker', label: 'calls', status: 'removed', path: 'components/gateway.md', occurrence: 1 },
+            { key: 'review:with:gateway:0', source_id: 'gateway', target_id: 'worker', label: 'routes', status: 'added', path: 'components/gateway.md', occurrence: 1 },
+            { key: 'review:with:gateway:1', source_id: 'gateway', target_id: 'queue', label: 'publishes', status: 'added', path: 'components/gateway.md', occurrence: 1 },
+            { key: 'review:with:gateway:2', source_id: 'gateway', target_id: 'queue', label: 'publishes', status: 'added', path: 'components/gateway.md', occurrence: 2 },
+            { key: 'review:with:worker:0', source_id: 'worker', target_id: 'queue', label: 'observes', status: 'added', path: 'components/worker.md', occurrence: 1 },
+          ],
+        }),
       },
     }
     const accepted = {
       source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: successor,
-      component_count: 1, component_titles: ['Worker'], components: [{ id: 'worker-id', title: 'Worker', description: 'Does work.\n' }],
+      component_count: 4, component_titles: ['Gateway', 'Worker', 'Docs', 'Queue'], components: withComponents,
       parent_diff: reviewed.changes.review.diff,
     }
     const fetchMock = mockResponses([pending, reviewed, accepted])
@@ -378,14 +462,41 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Review changes' }))
 
     expect(await screen.findByRole('heading', { name: 'Review changes' })).toBeInTheDocument()
-    expect(screen.getByText(/diff --git a\/components\/worker\.md/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'With changes' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('raw-diff').textContent).toBe(diff)
+    expect(screen.getByRole('button', { name: 'Added component: Queue' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Content changed: Gateway' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Content changed: Docs' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Added relationship, occurrence 1: Gateway — publishes — Queue' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Added relationship, occurrence 2: Gateway — publishes — Queue' })).toBeInTheDocument()
+    const reviewElements = graphHarness.calls.at(-1)?.elements as Array<{ data: Record<string, unknown> }>
+    expect(reviewElements.find((element) => element.data.id === 'worker')?.data.reviewStatus).toBe('unchanged')
+    expect(reviewElements.find((element) => element.data.id === 'review:with:worker:0')?.data.reviewStatus).toBe('added')
+    expect(reviewElements.find((element) => element.data.id === 'gateway')?.data.reviewStatus).toBe('content_changed')
     expect(screen.getByRole('button', { name: 'Update architecture' })).toBeInTheDocument()
     const reviewDetails = screen.getByText('Review details').closest('details') as HTMLElement
     expect(within(reviewDetails).getByText(base)).toBeInTheDocument()
     expect(within(reviewDetails).getByText(candidate)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Added component: Queue' }))
+    expect(screen.getByRole('heading', { name: 'Queue' })).toBeInTheDocument()
+    expect(screen.getByText('New queue.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Before changes' }))
+    expect(screen.getByRole('button', { name: 'Before changes' })).toHaveAttribute('aria-pressed', 'true')
+    expect(within(screen.getByRole('navigation', { name: 'Components' })).queryByText('Queue')).not.toBeInTheDocument()
+    expect(screen.queryByText('New queue.')).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Select a change' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'With changes' }))
+    await user.click(screen.getByRole('button', { name: 'Removed relationship: Gateway — calls — Worker' }))
+    expect(document.activeElement).toHaveAttribute('data-diff-path', 'components/gateway.md')
+    expect(screen.getByLabelText('Review context')).toHaveTextContent('Removed relationship')
+    await user.click(screen.getByRole('button', { name: 'Clear focus' }))
+    expect(screen.getByRole('heading', { name: 'Select a change' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Removed relationship: Gateway — calls — Worker' }))
     await user.click(screen.getByRole('button', { name: 'Update architecture' }))
 
-    expect(await screen.findByRole('heading', { name: 'Worker' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Gateway' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Changes in progress' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Update architecture' })).not.toBeInTheDocument()
     const technicalDetails = screen.getByText('Technical details').closest('details') as HTMLElement
@@ -417,6 +528,73 @@ describe('App', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Add a title to the untitled component before updating architecture.')
     expect(screen.queryByRole('button', { name: 'Update architecture' })).not.toBeInTheDocument()
     expect(screen.getByText('Untitled component')).toBeInTheDocument()
+  })
+
+  it('keeps exact review and deliberate confirmation usable when map initialization fails', async () => {
+    const base = '4'.repeat(40)
+    const candidate = '5'.repeat(40)
+    const component = { id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Changed.\n', relationships: [] }
+    const diff = 'diff --git a/components/gateway.md b/components/gateway.md\n@@ -1 +1 @@\n-Old\n+Changed\n'
+    const reviewed = {
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: base,
+      component_count: 1, component_titles: ['Gateway'], components: [{ ...component, description: 'Old.\n' }],
+      changes: {
+        valid: true,
+        components: [{ ...component, new: false }],
+        review: testReview({
+          base, candidate, diff,
+          before: [{ ...component, description: 'Old.\n' }],
+          withChanges: [component],
+          componentChanges: [{ component_id: 'gateway', status: 'content_changed', path: 'components/gateway.md' }],
+        }),
+      },
+    }
+    graphHarness.fail = true
+    mockResponses([reviewed])
+    render(<App />)
+    await submitPath('/tmp/example')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The architecture map could not be shown.')
+    expect(screen.getByTestId('raw-diff').textContent).toBe(diff)
+    expect(screen.getByText('Review details')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Update architecture' })).toBeEnabled()
+  })
+
+  it('keeps duplicate review titles bound to stable component identity across the side toggle', async () => {
+    const before = [
+      { id: 'public', title: 'Gateway', filename: 'public.md', description: 'Public before.\n', relationships: [] },
+      { id: 'private', title: 'Gateway', filename: 'private.md', description: 'Private before.\n', relationships: [] },
+    ]
+    const withChanges = [
+      before[0],
+      { ...before[1], description: 'Private with changes.\n' },
+    ]
+    mockResponses([{
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: '4'.repeat(40),
+      component_count: 2, component_titles: ['Gateway', 'Gateway'], components: before,
+      changes: {
+        valid: true,
+        components: [{ ...withChanges[1], new: false }],
+        review: testReview({
+          base: '4'.repeat(40), candidate: '5'.repeat(40), before, withChanges,
+          diff: 'diff --git a/components/private.md b/components/private.md\n-Private before.\n+Private with changes.\n',
+          componentChanges: [{ component_id: 'private', status: 'content_changed', path: 'components/private.md' }],
+        }),
+      },
+    }])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+    const index = await screen.findByRole('navigation', { name: 'Components' })
+
+    await user.click(within(index).getByRole('button', { name: 'Gateway, private.md, Content changed' }))
+    expect(screen.getByText('Private with changes.')).toBeInTheDocument()
+    expect(screen.queryByText('Public before.')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Before changes' }))
+    expect(screen.getByText('Private before.')).toBeInTheDocument()
+    expect(screen.queryByText('Private with changes.')).not.toBeInTheDocument()
+    expect(within(index).getByRole('button', { name: 'Gateway, private.md, Content changed' })).toHaveAttribute('aria-current', 'page')
   })
 
   it('marks a stale accepted view read-only while preserving visible changes in progress', async () => {
@@ -469,8 +647,8 @@ describe('App', () => {
     expect(screen.getByText('Accepted B.')).toBeInTheDocument()
     expect(screen.queryByText('Gateway A')).not.toBeInTheDocument()
     expect(graphHarness.calls.at(-1)?.elements).toEqual(expect.arrayContaining([
-      { data: { id: 'gateway', label: 'Gateway B' } },
-      { data: { id: 'projection:gateway:records:0', source: 'gateway', target: 'records', label: 'reads from', distance: 0 } },
+      expect.objectContaining({ data: expect.objectContaining({ id: 'gateway', label: 'Gateway B' }) }),
+      expect.objectContaining({ data: expect.objectContaining({ id: 'projection:gateway:records:0', source: 'gateway', target: 'records', label: 'reads from', distance: 0 }) }),
     ]))
     expect(within(screen.getByText('Technical details').closest('details') as HTMLElement).getByText(revisionB)).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
@@ -620,9 +798,26 @@ describe('App', () => {
     expect(screen.getByText('Private body.')).toBeInTheDocument()
     expect(graphHarness.calls.at(-1)?.elements).toHaveLength(5)
 
-    act(() => graphHarness.select?.({ target: { id: () => 'worker' } }))
+    act(() => graphHarness.nodeSelect?.({ target: { id: () => 'worker' } }))
     expect(screen.getByRole('heading', { name: 'Worker' })).toBeInTheDocument()
     expect(screen.getByText('Worker body.')).toBeInTheDocument()
+  })
+
+  it('clears accepted documentation selection to a neutral contextual pane', async () => {
+    mockResponses([{
+      source_root: '/tmp/example', project_name: 'example', state: 'ready', revision: '7'.repeat(40),
+      component_count: 1, component_titles: ['Gateway'],
+      components: [{ id: 'gateway', title: 'Gateway', filename: 'gateway.md', description: 'Gateway body.\n', relationships: [] }],
+    }])
+    render(<App />)
+    await submitPath('/tmp/example')
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'Clear selection' }))
+
+    expect(screen.getByRole('heading', { name: 'Select a component' })).toBeInTheDocument()
+    expect(screen.queryByText('Gateway body.')).not.toBeInTheDocument()
+    expect(within(screen.getByRole('navigation', { name: 'Components' })).getByRole('button', { name: 'Gateway' })).not.toHaveAttribute('aria-current')
   })
 
   it('authors ordered outgoing relationships with backend-supplied identity choices', async () => {
@@ -696,8 +891,8 @@ describe('App', () => {
     })
     expect(graphHarness.calls.at(-1)?.elements).toHaveLength(6)
     expect(graphHarness.calls.at(-1)?.elements).toEqual(expect.arrayContaining([
-      { data: { id: 'gateway', label: 'Gateway' } },
-	  { data: { id: 'projection:gateway:worker:0', source: 'gateway', target: 'worker', label: '  calls: primary  ', distance: 0 } },
+      expect.objectContaining({ data: expect.objectContaining({ id: 'gateway', label: 'Gateway' }) }),
+	  expect.objectContaining({ data: expect.objectContaining({ id: 'projection:gateway:worker:0', source: 'gateway', target: 'worker', label: '  calls: primary  ', distance: 0 }) }),
     ]))
     expect(graphHarness.calls.at(-1)?.elements).not.toEqual(expect.arrayContaining([{ data: expect.objectContaining({ id: 'queue' }) }]))
   })
@@ -768,7 +963,11 @@ describe('App', () => {
     expect(alert).toHaveTextContent(sourceName)
     expect(alert).toHaveTextContent(message)
     expect(alert).not.toHaveTextContent('before updating architecture')
-    await user.click(within(alert).getByRole('button', { name: 'Fix relationship' }))
+    const owningRow = screen.getByText('Needs attention').closest('li') as HTMLElement
+    expect(owningRow).toHaveAttribute('aria-invalid', 'true')
+    const fixAction = within(alert).getByRole('button', { name: 'Fix relationship' })
+    expect(fixAction).toHaveClass('inline-action')
+    await user.click(fixAction)
 
     const fieldControl = screen.getByLabelText(field === 'label' ? 'Label' : 'Target')
     expect(fieldControl).toHaveAttribute('aria-invalid', 'true')
@@ -854,10 +1053,12 @@ describe('App', () => {
   })
 
   it('keeps the current workspace when backend-held changes block project switching', async () => {
-    const review = {
+    const review = testReview({
+      base: '8'.repeat(40), candidate: '9'.repeat(40), generation: 2,
       diff: 'diff --git a/components/worker.md b/components/worker.md\n+# Worker\n',
-      base_revision: '8'.repeat(40), candidate_tree: '9'.repeat(40), generation: 2,
-    }
+      withChanges: [{ id: 'worker', title: 'Worker', filename: 'worker.md', description: '', relationships: [] }],
+      componentChanges: [{ component_id: 'worker', status: 'added', path: 'components/worker.md' }],
+    })
     const pending = {
       source_root: '/tmp/example', project_name: 'example', state: 'empty', revision: '8'.repeat(40),
       component_count: 0, component_titles: [], components: [],
@@ -870,7 +1071,7 @@ describe('App', () => {
     const user = userEvent.setup()
     await user.click(await screen.findByRole('button', { name: 'Open another project' }))
 
-    expect(await screen.findByRole('heading', { name: 'Changes in progress' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Review changes' })).toBeInTheDocument()
     const notice = screen.getByRole('alert')
     expect(notice).toHaveTextContent('Keep working here or discard these changes before opening another project.')
     expect(notice.parentElement).toHaveClass('workspace-shell')
@@ -942,7 +1143,7 @@ describe('App', () => {
 
   it.each([
     ['index selection', async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole('button', { name: 'Worker' }))],
-    ['map selection', async () => act(() => graphHarness.select?.({ target: { id: () => 'worker' } }))],
+    ['map selection', async () => act(() => graphHarness.nodeSelect?.({ target: { id: () => 'worker' } }))],
     ['Changes in progress', async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole('button', { name: /Changes in progress/ }))],
     ['Open another project', async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole('button', { name: 'Open another project' }))],
   ])('guards dirty editor values before %s replaces the task', async (_label, navigate) => {
@@ -981,7 +1182,11 @@ describe('App', () => {
       changes: {
         valid: true,
         components: [{ id: 'worker-id', title: 'Worker', description: '', new: true }],
-        review: { diff: 'diff --git a/components/worker.md b/components/worker.md', base_revision: '1'.repeat(40), candidate_tree: '2'.repeat(40), generation: 1 },
+        review: testReview({
+          base: '1'.repeat(40), candidate: '2'.repeat(40), diff: 'diff --git a/components/worker.md b/components/worker.md',
+          withChanges: [{ id: 'worker-id', title: 'Worker', description: '', relationships: [] }],
+          componentChanges: [{ component_id: 'worker-id', status: 'added', path: 'components/worker-id.md' }],
+        }),
       },
     }
     const changed = { ...reviewed, action_error: 'review_changed', changes: { valid: true, components: reviewed.changes.components } }
@@ -1006,10 +1211,11 @@ describe('App', () => {
         changes: {
           valid: true,
           components: [{ id: 'worker-id', title: 'Worker', description: '', new: true }],
-          review: {
-            diff: 'diff --git a/components/worker.md b/components/worker.md',
-            base_revision: '1'.repeat(40), candidate_tree: '2'.repeat(40), generation: 1,
-          },
+          review: testReview({
+            base: '1'.repeat(40), candidate: '2'.repeat(40), diff: 'diff --git a/components/worker.md b/components/worker.md',
+            withChanges: [{ id: 'worker-id', title: 'Worker', description: '', relationships: [] }],
+            componentChanges: [{ component_id: 'worker-id', status: 'added', path: 'components/worker-id.md' }],
+          }),
         },
       }
       let call = 0

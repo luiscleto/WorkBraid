@@ -1,6 +1,12 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react'
-import { ArchitectureMap } from './ArchitectureMap'
+import {
+  ArchitectureMap,
+  ReviewMapComponentChange,
+  ReviewMapRelationshipChange,
+  ReviewRelationshipSelection,
+} from './ArchitectureMap'
 import { MarkdownBody } from './MarkdownBody'
+import { RawDiff } from './RawDiff'
 
 type Inspection = {
   source_root: string
@@ -27,7 +33,7 @@ type AuthoringComponent = {
   title: string
   description: string
   filename: string
-  relationships: { target_id: string; label: string }[]
+  relationships: { target_id: string; label: string; projection_key?: string }[]
 }
 
 type PendingComponent = AuthoringComponent & { new: boolean }
@@ -60,7 +66,26 @@ type ChangeReview = {
   base_revision: string
   candidate_tree: string
   generation: number
+  before: ReviewSnapshot
+  with_changes: ReviewSnapshot
+  comparison: {
+    components: ReviewMapComponentChange[]
+    relationships: ReviewMapRelationshipChange[]
+  }
 }
+
+type ReviewSnapshot = {
+  revision: string
+  component_count: number
+  component_titles: string[]
+  components: AuthoringComponent[]
+}
+
+type ReviewSide = 'with' | 'before'
+
+type ReviewFocus =
+  | { kind: 'component'; key: string; componentID: string; title: string; path: string; status: 'added' | 'content_changed' | 'unchanged' }
+  | ({ kind: 'relationship' } & ReviewRelationshipSelection)
 
 type ComponentEditor = {
   kind: 'add' | 'edit'
@@ -86,6 +111,7 @@ type NavigationIntent =
   | { kind: 'add' }
   | { kind: 'open-another' }
   | { kind: 'refresh' }
+  | { kind: 'clear' }
 
 type ErrorCode =
   | 'path_required'
@@ -161,6 +187,20 @@ function relationshipIssueComponentName(changes: ChangesInProgress, component: P
   return target?.context ? `${title} — ${target.context}` : title
 }
 
+function canonicalReviewPath(component: AuthoringComponent) {
+  return `components/${component.filename}`
+}
+
+function componentStatusText(status: Extract<ReviewFocus, { kind: 'component' }>['status']) {
+  if (status === 'added') return 'Added component'
+  if (status === 'content_changed') return 'Content changed'
+  return 'Unchanged component'
+}
+
+function relationshipStatusText(status: Extract<ReviewFocus, { kind: 'relationship' }>['status']) {
+  return status === 'added' ? 'Added' : 'Removed'
+}
+
 export function App() {
   const [sourceRoot, setSourceRoot] = useState('')
   const [state, setState] = useState<ViewState>({ kind: 'idle' })
@@ -173,6 +213,8 @@ export function App() {
   const [workspaceTask, setWorkspaceTask] = useState<WorkspaceTask>('empty')
   const [navigationIntent, setNavigationIntent] = useState<NavigationIntent | null>(null)
   const [discardConfirming, setDiscardConfirming] = useState(false)
+  const [reviewSide, setReviewSide] = useState<ReviewSide>('with')
+  const [reviewFocus, setReviewFocus] = useState<ReviewFocus | null>(null)
 
   const enterWorkspace = useCallback((result: ArchitectureResult, task?: WorkspaceTask) => {
     setState({ kind: 'ready', value: result })
@@ -180,11 +222,35 @@ export function App() {
     setWorkspaceTask(task ?? (result.changes?.components.length ? 'changes' : result.components?.length ? 'documentation' : 'empty'))
   }, [])
 
+  const readyResult = state.kind === 'ready' ? state.value : undefined
+  const currentReview = readyResult?.changes?.review
+  const reviewIdentity = currentReview ? `${currentReview.base_revision}:${currentReview.candidate_tree}:${currentReview.generation}` : ''
+
+  useEffect(() => {
+    if (!currentReview) {
+      setReviewFocus(null)
+      return
+    }
+    setReviewSide('with')
+    setReviewFocus(null)
+    setSelectedComponentID((current) => currentReview.with_changes.components.some((component) => component.id === current)
+      ? current
+      : currentReview.with_changes.components[0]?.id)
+  }, [reviewIdentity])
+
   useEffect(() => {
     if (state.kind !== 'ready') return
+    const review = state.value.changes?.review
+    if (review) {
+      const active = reviewSide === 'with' ? review.with_changes.components : review.before.components
+      if (selectedComponentID && active.some((component) => component.id === selectedComponentID)) return
+      if (selectedComponentID) setSelectedComponentID(undefined)
+      return
+    }
+    if (workspaceTask === 'empty' && state.value.components?.length) return
     if (selectedComponentID && state.value.components?.some((component) => component.id === selectedComponentID)) return
     setSelectedComponentID(state.value.components?.[0]?.id)
-  }, [state, selectedComponentID])
+  }, [state, selectedComponentID, reviewSide, workspaceTask])
 
   async function inspectProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -386,6 +452,12 @@ export function App() {
       setWorkspaceTask('changes')
       return
     }
+    if (intent.kind === 'clear') {
+      setSelectedComponentID(undefined)
+      setReviewFocus(null)
+      setWorkspaceTask('empty')
+      return
+    }
     if (intent.kind === 'add') {
       setEditor({
         kind: 'add', title: '', description: '', descriptionPrefix: '', titleChanged: false, descriptionChanged: false,
@@ -466,9 +538,41 @@ export function App() {
 
   if (state.kind === 'ready') {
     const result = state.value
-    const selected = result.components?.find((component) => component.id === selectedComponentID)
+    const review = result.changes?.review
+    const activeProjection = review ? (reviewSide === 'with' ? review.with_changes : review.before) : undefined
+    const activeComponents = activeProjection?.components ?? result.components ?? []
+    const selected = activeComponents.find((component) => component.id === selectedComponentID)
     const titleCounts = new Map<string, number>()
-    for (const component of result.components ?? []) titleCounts.set(component.title, (titleCounts.get(component.title) ?? 0) + 1)
+    for (const component of activeComponents) titleCounts.set(component.title, (titleCounts.get(component.title) ?? 0) + 1)
+    const componentReviewStatus = new Map(review?.comparison.components.map((change) => [change.component_id, change]))
+    const layoutComponentIDs = review
+      ? [...new Set([...review.before.components, ...review.with_changes.components].map((component) => component.id))]
+      : undefined
+    const selectComponent = (id: string) => {
+      if (!review) {
+        requestNavigation({ kind: 'component', id })
+        return
+      }
+      const component = activeComponents.find((candidate) => candidate.id === id)
+      if (!component) return
+      const change = componentReviewStatus.get(id)
+      setSelectedComponentID(id)
+      setReviewFocus({
+        kind: 'component', key: `component:${id}`, componentID: id, title: component.title,
+        path: change?.path ?? canonicalReviewPath(component), status: change?.status ?? 'unchanged',
+      })
+    }
+    const selectRelationship = (relationship: ReviewRelationshipSelection) => {
+      setSelectedComponentID(relationship.source_id)
+      setReviewFocus({ kind: 'relationship', ...relationship })
+    }
+    const switchReviewSide = (side: ReviewSide) => {
+      if (!review || side === reviewSide) return
+      const nextComponents = side === 'with' ? review.with_changes.components : review.before.components
+      setReviewSide(side)
+      setReviewFocus(null)
+      setSelectedComponentID((current) => current && nextComponents.some((component) => component.id === current) ? current : undefined)
+    }
     return (
       <main className="workspace-shell">
         <header className="application-frame">
@@ -497,42 +601,80 @@ export function App() {
             <button className="notice-dismiss" type="button" aria-label="Dismiss message" onClick={() => setArchitectureNotice('')}>×</button>
           </div>
         )}
-        <div className={`architecture-workbench ${result.changes?.review ? 'reviewing' : ''}`}>
+        <div className={`architecture-workbench ${review ? 'reviewing' : ''}`}>
           <nav className="component-index" aria-label="Components">
-            <div className="index-heading"><h1>Components</h1></div>
-            {result.components?.length ? (
+            <div className="index-heading"><h1>{review ? (reviewSide === 'with' ? 'With changes' : 'Before changes') : 'Components'}</h1></div>
+            {activeComponents.length ? (
               <ul>
-                {result.components.map((component) => (
+                {activeComponents.map((component) => {
+                  const reviewStatus = componentReviewStatus.get(component.id)?.status ?? (review ? 'unchanged' : '')
+                  const statusLabel = reviewStatus === 'added' ? 'Added' : reviewStatus === 'content_changed' ? 'Content changed' : ''
+                  return (
                   <li key={component.id}>
                     <button
                       type="button"
-                      className={component.id === selectedComponentID && workspaceTask === 'documentation' && !editor ? 'selected' : ''}
-                      aria-label={(titleCounts.get(component.title) ?? 0) > 1 ? `${component.title}, ${component.filename || component.id.slice(0, 8)}` : undefined}
-                      aria-current={component.id === selectedComponentID && workspaceTask === 'documentation' && !editor ? 'page' : undefined}
-                      onClick={() => requestNavigation({ kind: 'component', id: component.id })}
+                      className={`${component.id === selectedComponentID && !editor ? 'selected' : ''} ${review ? `review-${reviewStatus.replace('_', '-')}` : ''}`.trim()}
+                      aria-label={[(titleCounts.get(component.title) ?? 0) > 1 ? `${component.title}, ${component.filename || component.id.slice(0, 8)}` : component.title, statusLabel].filter(Boolean).join(', ')}
+                      aria-current={component.id === selectedComponentID && !editor ? 'page' : undefined}
+                      onClick={() => selectComponent(component.id)}
                     >
                       <span>{component.title}</span>
                       {(titleCounts.get(component.title) ?? 0) > 1 && <small>{' '}{component.filename || component.id.slice(0, 8)}</small>}
+                      {statusLabel && <small className="index-review-status">{statusLabel}</small>}
                     </button>
                   </li>
-                ))}
+                  )
+                })}
               </ul>
             ) : <p className="index-empty">No components</p>}
-            {!result.stale && !result.changes?.stale && !acceptanceUnknown && (
+            {!review && !result.stale && !result.changes?.stale && !acceptanceUnknown && (
               <button className="index-add" type="button" onClick={() => requestNavigation({ kind: 'add' })}>Add component</button>
             )}
           </nav>
           <section className="map-region">
-            <div className="region-label">Architecture map</div>
+            <div className="region-label">{review ? (reviewSide === 'with' ? 'With changes map' : 'Before changes map') : 'Architecture map'}</div>
             <ArchitectureMap
-              revision={result.revision}
-              components={result.components ?? []}
+              revision={activeProjection?.revision ?? result.revision}
+              components={activeComponents}
               selectedID={selectedComponentID}
-              onSelect={(id) => requestNavigation({ kind: 'component', id })}
+              onSelect={selectComponent}
+              {...(review ? {
+                layoutComponentIDs,
+                reviewSide,
+                reviewComponents: review.comparison.components,
+                reviewRelationships: review.comparison.relationships,
+                selectedRelationshipKey: reviewFocus?.kind === 'relationship' ? reviewFocus.key : undefined,
+                onSelectRelationship: selectRelationship,
+              } : {})}
             />
           </section>
           <aside className="working-pane" aria-label="Architecture task">
-            {editor ? (
+            {review && result.changes ? (
+              <ChangesTask
+                result={result}
+                busy={architectureBusy}
+                acceptanceUnknown={acceptanceUnknown}
+                discardConfirming={discardConfirming}
+                reviewSide={reviewSide}
+                selectedReviewComponent={selected}
+                reviewFocus={reviewFocus}
+                onReviewSide={switchReviewSide}
+                onClearReviewFocus={() => {
+                  setSelectedComponentID(undefined)
+                  setReviewFocus(null)
+                }}
+                onEdit={(component) => editPending(component, undefined, result.stale || result.changes?.stale)}
+                onFixRelationship={(component) => editPending(component, {
+                  position: result.changes?.validation_relationship_position ?? 0,
+                  field: result.changes?.validation_relationship_field ?? 'target',
+                })}
+                onReview={() => reviewChanges(result)}
+                onUpdate={() => updateArchitecture(result)}
+                onBeginDiscard={() => setDiscardConfirming(true)}
+                onCancelDiscard={() => setDiscardConfirming(false)}
+                onDiscard={() => discardChanges(result)}
+              />
+            ) : editor ? (
               <ComponentEditorForm
                 editor={editor}
                 setEditor={setEditor}
@@ -560,10 +702,12 @@ export function App() {
               />
             ) : selected ? (
               <article className="component-documentation">
-                <div className="pane-heading"><p className="eyebrow">Component</p><h2>{selected.title}</h2></div>
+                <div className="pane-heading pane-heading-with-action"><div><p className="eyebrow">Component</p><h2>{selected.title}</h2></div><button className="text-action" type="button" onClick={() => requestNavigation({ kind: 'clear' })}>Clear selection</button></div>
                 <MarkdownBody source={selected.description} />
                 {!result.stale && !result.changes?.stale && !acceptanceUnknown && <button className="inline-action" type="button" onClick={() => editAccepted(selected, result)}>Edit component</button>}
               </article>
+            ) : result.components?.length ? (
+              <div className="workspace-empty"><p className="eyebrow">Architecture</p><h2>Select a component</h2><p>Choose a component from the index or map to read its documentation.</p></div>
             ) : (
               <div className="workspace-empty"><p className="eyebrow">Architecture</p><h2>Start with a component</h2><p>Add the first part of this architecture to begin the map.</p></div>
             )}
@@ -795,6 +939,11 @@ function ChangesTask({
   busy,
   acceptanceUnknown,
   discardConfirming,
+  reviewSide,
+  selectedReviewComponent,
+  reviewFocus,
+  onReviewSide,
+  onClearReviewFocus,
   onEdit,
   onFixRelationship,
   onReview,
@@ -807,6 +956,11 @@ function ChangesTask({
   busy: boolean
   acceptanceUnknown: boolean
   discardConfirming: boolean
+  reviewSide?: ReviewSide
+  selectedReviewComponent?: AuthoringComponent
+  reviewFocus?: ReviewFocus | null
+  onReviewSide?: (side: ReviewSide) => void
+  onClearReviewFocus?: () => void
   onEdit: (component: PendingComponent) => void
   onFixRelationship: (component: PendingComponent) => void
   onReview: () => void
@@ -824,17 +978,63 @@ function ChangesTask({
   const discardAction = !acceptanceUnknown
     ? <button className="discard-action" type="button" disabled={busy} onClick={onBeginDiscard}>Discard changes</button>
     : null
+  if (changes.review && !result.stale && !changes.stale && reviewSide && onReviewSide && onClearReviewFocus) {
+    return (
+      <section className="changes-in-progress review-workspace-pane" aria-labelledby="review-heading">
+        <div className="review-heading-row">
+          <div className="pane-heading"><p className="eyebrow">Architecture</p><h2 id="review-heading">Review changes</h2></div>
+          <div className="review-side-toggle" role="group" aria-label="Review side">
+            <button type="button" aria-pressed={reviewSide === 'with'} onClick={() => onReviewSide('with')}>With changes</button>
+            <button type="button" aria-pressed={reviewSide === 'before'} onClick={() => onReviewSide('before')}>Before changes</button>
+          </div>
+        </div>
+        <p className="review-introduction">Inspect the visual change and complete exact diff before updating the architecture.</p>
+        <ReviewContext
+          side={reviewSide}
+          component={selectedReviewComponent}
+          components={reviewSide === 'with' ? changes.review.with_changes.components : changes.review.before.components}
+          focus={reviewFocus}
+          onClear={onClearReviewFocus}
+        />
+        <section className="raw-diff-region" aria-labelledby="raw-diff-heading">
+          <div className="review-section-heading"><h3 id="raw-diff-heading">Complete change</h3><span>Raw unified diff</span></div>
+          <RawDiff
+            diff={changes.review.diff}
+            focusPath={reviewFocus?.path}
+            focusToken={reviewFocus?.key}
+          />
+        </section>
+        <details className="review-details">
+          <summary>Review details</summary>
+          <dl>
+            <dt>Base revision</dt><dd>{changes.review.base_revision}</dd>
+            <dt>Candidate tree</dt><dd>{changes.review.candidate_tree}</dd>
+            <dt>Change version</dt><dd>{changes.review.generation}</dd>
+          </dl>
+        </details>
+        <div className="change-actions">
+          <button className="inline-action" type="button" disabled={busy} onClick={onUpdate}>{busy ? 'Updating…' : 'Update architecture'}</button>
+          {discardAction}
+        </div>
+        {discardConfirming && <DiscardChangesDialog busy={busy} onCancel={onCancelDiscard} onDiscard={onDiscard} />}
+      </section>
+    )
+  }
   return (
     <section className="changes-in-progress" aria-labelledby="changes-heading">
       <div className="pane-heading"><p className="eyebrow">Architecture</p><h2 id="changes-heading">Changes in progress</h2></div>
       <p>{changes.stale ? 'These changes started from an older architecture and are read-only.' : 'These changes have not updated the architecture yet.'}</p>
       <ul>
-        {changes.components.map((component) => (
-          <li key={component.id}>
+        {changes.components.map((component) => {
+          const ownsReviewBlocker = Boolean(changes.review_blocker && changes.validation_item === component.id)
+          return (
+          <li className={ownsReviewBlocker ? 'validation-owner' : undefined} aria-invalid={ownsReviewBlocker || undefined} key={component.id}>
             <span>{component.title.trim() || 'Untitled component'}</span>
+            {ownsReviewBlocker && <strong className="validation-marker">Needs attention</strong>}
             {!acceptanceUnknown && <button className="text-action" type="button" onClick={() => onEdit(component)}>{result.stale || changes.stale ? 'View' : 'Edit'}</button>}
           </li>
-        ))}
+          )
+        })}
       </ul>
       {changes.review_blocker && (
         <div className="review-error" role="alert">
@@ -842,7 +1042,7 @@ function ChangesTask({
             <>
               <p><strong>{relationshipIssueName}</strong> has a relationship {result.stale || changes.stale ? 'issue in these read-only changes.' : 'to fix.'}</p>
               <p>{result.stale || changes.stale ? messageForReadOnlyReviewBlocker(changes.review_blocker) : messageForReviewBlocker(changes.review_blocker)}</p>
-              {!result.stale && !changes.stale && <button className="text-action" type="button" onClick={() => onFixRelationship(relationshipIssueComponent)}>Fix relationship</button>}
+              {!result.stale && !changes.stale && <button className="inline-action fix-relationship" type="button" onClick={() => onFixRelationship(relationshipIssueComponent)}>Fix relationship</button>}
             </>
           ) : <p>{messageForReviewBlocker(changes.review_blocker)}</p>}
         </div>
@@ -856,38 +1056,71 @@ function ChangesTask({
           {discardAction}
         </div>
       )}
-      {changes.review && !result.stale && !changes.stale && (
-        <section className="change-review" aria-labelledby="review-heading">
-          <h3 id="review-heading">Review changes</h3>
-          <p>Inspect the complete change before updating the architecture; backslashes and non-printing characters use escaped notation.</p>
-          <pre>{changes.review.diff}</pre>
-          <details>
-            <summary>Review details</summary>
-            <dl>
-              <dt>Base revision</dt><dd>{changes.review.base_revision}</dd>
-              <dt>Candidate tree</dt><dd>{changes.review.candidate_tree}</dd>
-              <dt>Change version</dt><dd>{changes.review.generation}</dd>
-            </dl>
-          </details>
-          <div className="change-actions">
-            <button className="inline-action" type="button" disabled={busy} onClick={onUpdate}>{busy ? 'Updating…' : 'Update architecture'}</button>
-            {discardAction}
-          </div>
-        </section>
-      )}
-      {discardConfirming && (
-        <div className="navigation-guard" role="dialog" aria-modal="true" aria-labelledby="discard-heading">
-          <div className="discard-confirmation">
-            <h2 id="discard-heading">Discard changes?</h2>
-            <p>This clears every change in progress. The accepted architecture will not change.</p>
-            <div className="button-group">
-              <button className="secondary-action" type="button" onClick={onCancelDiscard}>Keep changes</button>
-              <button className="destructive-action" type="button" disabled={busy} onClick={onDiscard}>Discard changes</button>
-            </div>
-          </div>
+      {discardConfirming && <DiscardChangesDialog busy={busy} onCancel={onCancelDiscard} onDiscard={onDiscard} />}
+    </section>
+  )
+}
+
+function ReviewContext({
+  side,
+  component,
+  components,
+  focus,
+  onClear,
+}: {
+  side: ReviewSide
+  component?: AuthoringComponent
+  components: AuthoringComponent[]
+  focus?: ReviewFocus | null
+  onClear: () => void
+}) {
+  const titles = new Map(components.map((candidate) => [candidate.id, candidate.title]))
+  if (!component) {
+    return (
+      <section className="review-context review-context-empty" aria-label="Review context">
+        <p className="eyebrow">{side === 'with' ? 'With changes' : 'Before changes'}</p>
+        <h3>Select a change</h3>
+        <p>Choose a component or relationship to inspect its documentation and exact diff.</p>
+      </section>
+    )
+  }
+  return (
+    <section className="review-context" aria-label="Review context">
+      <div className="review-context-heading">
+        <div>
+          <p className="eyebrow">{focus?.kind === 'relationship' ? `${relationshipStatusText(focus.status)} relationship` : focus?.kind === 'component' ? componentStatusText(focus.status) : side === 'with' ? 'With changes' : 'Before changes'}</p>
+          <h3>{component.title}</h3>
         </div>
+        <button className="text-action" type="button" onClick={onClear}>Clear focus</button>
+      </div>
+      {focus?.kind === 'relationship' && (
+        <p className={`review-relationship-summary review-${focus.status}`}>
+          <span>{focus.source_title}</span><strong>{focus.label}</strong><span>{focus.target_title}</span>
+        </p>
+      )}
+      <MarkdownBody source={component.description} />
+      {component.relationships.length > 0 && (
+        <details className="review-relationships">
+          <summary>Outgoing relationships ({component.relationships.length})</summary>
+          <ul>{component.relationships.map((relationship, index) => <li key={relationship.projection_key ?? `${relationship.target_id}:${index}`}><span>{relationship.label}</span> → <span>{titles.get(relationship.target_id) ?? 'Component unavailable'}</span></li>)}</ul>
+        </details>
       )}
     </section>
+  )
+}
+
+function DiscardChangesDialog({ busy, onCancel, onDiscard }: { busy: boolean; onCancel: () => void; onDiscard: () => void }) {
+  return (
+    <div className="navigation-guard" role="dialog" aria-modal="true" aria-labelledby="discard-heading">
+      <div className="discard-confirmation">
+        <h2 id="discard-heading">Discard changes?</h2>
+        <p>This clears every change in progress. The accepted architecture will not change.</p>
+        <div className="button-group">
+          <button className="secondary-action" type="button" onClick={onCancel}>Keep changes</button>
+          <button className="destructive-action" type="button" disabled={busy} onClick={onDiscard}>Discard changes</button>
+        </div>
+      </div>
+    </div>
   )
 }
 
