@@ -477,8 +477,30 @@ describe('App', () => {
     expect(reviewElements.find((element) => element.data.id === 'worker')?.data.reviewStatus).toBe('unchanged')
     expect(reviewElements.find((element) => element.data.id === 'review:with:worker:0')?.data.reviewStatus).toBe('added')
     expect(reviewElements.find((element) => element.data.id === 'gateway')?.data.reviewStatus).toBe('content_changed')
-    expect(reviewStyles.find((rule) => rule.selector === 'node:selected')?.style).toEqual({ 'border-width': 5, opacity: 1 })
-    expect(reviewStyles.find((rule) => rule.selector === 'edge:selected')?.style).toEqual({ width: 4.5, opacity: 1 })
+    expect(reviewStyles.find((rule) => rule.selector === 'node:selected')?.style).toEqual({
+      'background-color': '#e7dba9', 'border-color': '#18734f', 'border-width': 4, opacity: 1,
+    })
+    expect(reviewStyles.find((rule) => rule.selector === 'edge:selected')?.style).toEqual({
+      width: 4, opacity: 1, 'line-color': '#18734f', 'target-arrow-color': '#18734f',
+    })
+    expect(reviewStyles.find((rule) => rule.selector === 'node[reviewStatus = "unchanged"]:selected')?.style).toEqual({
+      'background-color': '#f8f0dc', 'border-color': '#27251f', 'border-width': 5, 'border-style': 'dotted', opacity: 1,
+    })
+    expect(reviewStyles.find((rule) => rule.selector === 'node[reviewStatus = "added"]:selected')?.style).toEqual({
+      'background-color': '#d8eadf', 'border-color': '#126747', 'border-width': 5, shape: 'hexagon', opacity: 1,
+    })
+    expect(reviewStyles.find((rule) => rule.selector === 'node[reviewStatus = "content_changed"]:selected')?.style).toEqual({
+      'background-color': '#f1dfad', 'border-color': '#8c5c12', 'border-width': 5, 'border-style': 'dashed', opacity: 1,
+    })
+    expect(reviewStyles.find((rule) => rule.selector === 'edge[reviewStatus = "unchanged"]:selected')?.style).toEqual({
+      width: 4.5, opacity: 1, 'line-color': '#736c5c', 'target-arrow-color': '#736c5c', 'line-style': 'dotted',
+    })
+    expect(reviewStyles.find((rule) => rule.selector === 'edge[reviewStatus = "added"]:selected')?.style).toEqual({
+      width: 4.5, opacity: 1, 'line-color': '#126747', 'target-arrow-color': '#126747',
+    })
+    expect(reviewStyles.find((rule) => rule.selector === 'edge[reviewStatus = "removed"]:selected')?.style).toEqual({
+      width: 4.5, opacity: 1, 'line-color': '#a04432', 'target-arrow-color': '#a04432', 'line-style': 'dashed',
+    })
     expect(screen.getByRole('button', { name: 'Update architecture' })).toBeInTheDocument()
     const reviewDetails = screen.getByText('Review details').closest('details') as HTMLElement
     const technicalDetails = screen.getByText('Technical details').closest('details') as HTMLElement
